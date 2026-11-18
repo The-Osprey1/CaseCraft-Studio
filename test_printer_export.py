@@ -132,15 +132,19 @@ def test_preview_bed_matches_exported_3mf(tmp_path, printer):
     assert out["printer"].id == printer
 
 
-def test_bed_overflow_blocks_export_but_preview_shows_it(tmp_path, monkeypatch):
+@pytest.mark.parametrize("bed", [(120, 180), (120, 100)])   # too small in total / smaller than one part
+def test_bed_overflow_blocks_export_but_preview_shows_it(tmp_path, monkeypatch, bed):
     from fastapi.testclient import TestClient
     import printers
     import server
-    tiny = printers.PrinterProfile("tiny", "Tiny test bed", 120, 180, 100, 5, 4, False, "test", False)
+    tiny = printers.PrinterProfile("tiny", "Tiny test bed", bed[0], bed[1], 100, 5, 4, False, "test", False)
     monkeypatch.setitem(printers.PRINTERS, "tiny", tiny)
     c = TestClient(server.app)
     d = json.loads((PRESETS / "iphone_15_pro.json").read_text(encoding="utf-8"))
-    prev = c.post("/api/generate-preview?printer=tiny", json=d).json()
+    server._preview_cache.clear()
+    r = c.post("/api/generate-preview?printer=tiny", json=d)
+    assert r.status_code == 200, r.text
+    prev = r.json()
     assert prev["bed"]["fits"] is False and prev["export_blocked"] is True
     assert prev["findings"][0]["level"] == "error" and "build plate" in prev["findings"][0]["message"]
     r = c.post("/api/export-zip?printer=tiny", json=d)

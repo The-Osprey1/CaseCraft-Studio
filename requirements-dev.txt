@@ -1,0 +1,5 @@
+-r requirements.txt
+pytest>=8,<10
+# 3MF Consortium reference library: independent strict-mode check of exported 3MF files.
+# Optional at runtime and in tests (skipped when absent); CI installs it.
+lib3mf==2.5.0

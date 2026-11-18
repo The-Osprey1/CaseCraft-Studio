@@ -849,7 +849,7 @@ def unibody_adaptations(p: Preset) -> list[str]:
     notes.append("Unibody: the camera surround is flush with the back (a raised bezel would lift the "
                  "case off the bed when printing back-down); use the modular camera ring for a raised guard.")
     if p.pattern.type != "solid" and p.pattern.mode == "inlay":
-        notes.append("Unibody: the 2-colour inlay is exported as a deboss recess (single material).")
+        notes.append("Unibody: the 2-color inlay is exported as a deboss recess (single material).")
     return notes
 
 

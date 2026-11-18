@@ -15,7 +15,9 @@ from collections import OrderedDict
 from pathlib import Path
 
 from build123d import Compound, Pos
-from fastapi import APIRouter, FastAPI, HTTPException, Query, Response
+import anyio
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -106,7 +108,7 @@ def _bed_layout(oriented_map: dict, pr: PrinterProfile):
     except bambu_3mf.BedOverflow as exc:
         for o in objs:
             o.position = None
-        bambu_3mf.auto_layout(objs, bed=(10_000.0, pr.bed_y), margin=pr.margin)
+        bambu_3mf.auto_layout(objs, bed=(10_000.0, 10_000.0), margin=pr.margin)
         return objs, str(exc)
 
 
@@ -315,8 +317,22 @@ def get_presets():
     }
 
 
+def _cad_unless_abandoned(request: Request, fn):
+    """Run `fn` under the CAD lock, unless the client went away while the request was queued.
+    The UI aborts superseded preview requests; without this check every aborted request would
+    still occupy the (serialised) CAD kernel before the newest one could start."""
+    gone = lambda: anyio.from_thread.run(request.is_disconnected)  # noqa: E731
+    while not _cad_lock.acquire(timeout=0.2):
+        if gone():
+            return None
+    try:
+        return None if gone() else fn()
+    finally:
+        _cad_lock.release()
+
+
 @router.post("/generate-preview")
-def generate_preview(payload: dict, printer: str = Query(default=DEFAULT_PRINTER)):
+async def generate_preview(request: Request, payload: dict, printer: str = Query(default=DEFAULT_PRINTER)):
     p = _preset_from_payload(payload)
     pr = _printer(printer)
     key = (_preset_hash(p), pr.id)
@@ -326,8 +342,9 @@ def generate_preview(payload: dict, printer: str = Query(default=DEFAULT_PRINTER
             return _preview_cache[key]
 
     try:
-        with _cad_lock:
-            result = _build_preview(p, pr)
+        result = await run_in_threadpool(_cad_unless_abandoned, request, lambda: _build_preview(p, pr))
+        if result is None:          # client disconnected: nobody is waiting for this preview
+            return Response(status_code=499)
     except ParamError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:

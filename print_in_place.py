@@ -26,7 +26,7 @@ TOL = 1e-3                  # mm3 overlap considered contact
 RELATIONSHIPS = {
     "captured": "separate parts held by the snap joint; must not bond, separated by flexing the TPU after printing",
     "moving": "must move freely after printing",
-    "fused": "intentionally bonded multi-colour sub-parts of one object",
+    "fused": "intentionally bonded multi-color sub-parts of one object",
     "post_assembly": "printed beside the case and assembled after printing",
 }
 

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
   Check,
@@ -14,300 +14,37 @@ import {
   Smartphone,
   Sparkles,
   Trash2,
-  Upload,
   Wand2,
 } from "lucide-react";
 import Viewport3D from "./components/Viewport3D.jsx";
 import CrossSectionDiagram from "./components/CrossSectionDiagram.jsx";
+import PatternControls from "./components/PatternControls.jsx";
+import ValidationStatus, { validationState } from "./components/ValidationStatus.jsx";
+import DeviceBadge from "./components/DeviceBadge.jsx";
+import PrinterSelect from "./components/PrinterSelect.jsx";
+import { NumberField, SliderField } from "./components/Fields.jsx";
+import {
+  BAMBU_SWATCHES,
+  CALIBRATION_PROFILES,
+  DEFAULT_VISIBLE,
+  FILAMENT_THEMES,
+  cleanDeviceName,
+} from "./constants.jsx";
+import usePreview from "./hooks/usePreview.js";
+import useExports from "./hooks/useExports.js";
+import { downloadBlob } from "./api.js";
 
-const SAMPLE_SVGS = {
-  star: {
-    label: "Star Emblem",
-    svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path d="M50 5 L61 38 L95 38 L67 58 L78 92 L50 71 L22 92 L33 58 L5 38 L39 38 Z"/><circle cx="50" cy="50" r="8"/></svg>',
-  },
-  bolt: {
-    label: "Lightning Bolt",
-    svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path d="M58 4 L18 55 L46 55 L38 96 L82 42 L53 42 Z"/></svg>',
-  },
-  crest: {
-    label: "Geometric Crest",
-    svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path d="M50 6 L88 28 L88 72 L50 94 L12 72 L12 28 Z M50 22 L73 35 L73 65 L50 78 L27 65 L27 35 Z"/></svg>',
-  },
-};
-
-const FILAMENT_THEMES = [
-  {
-    id: "bambu-orange",
-    name: "Bambu Carbon",
-    subtitle: "Charcoal TPU + Orange Accents",
-    colors: {
-      frame: "#181b20",
-      backplate: "#2d333b",
-      inlay: "#f97316",
-      camera_ring: "#f97316",
-      buttons: "#f97316",
-    },
-  },
-  {
-    id: "cyber-cyan",
-    name: "Cyber Cyan",
-    subtitle: "Midnight Navy + Neon Cyan",
-    colors: {
-      frame: "#0f172a",
-      backplate: "#1e293b",
-      inlay: "#06b6d4",
-      camera_ring: "#22d3ee",
-      buttons: "#22d3ee",
-    },
-  },
-  {
-    id: "stealth-matte",
-    name: "Stealth Matte",
-    subtitle: "Triple Black + Slate Ring",
-    colors: {
-      frame: "#111315",
-      backplate: "#1c1f24",
-      inlay: "#475569",
-      camera_ring: "#3f444e",
-      buttons: "#64748b",
-    },
-  },
-  {
-    id: "voron-racing",
-    name: "Voron Racing",
-    subtitle: "Jet Black + Crimson ABS",
-    colors: {
-      frame: "#141417",
-      backplate: "#232329",
-      inlay: "#ef4444",
-      camera_ring: "#ef4444",
-      buttons: "#ef4444",
-    },
-  },
-  {
-    id: "arctic-frost",
-    name: "Arctic Frost",
-    subtitle: "Storm Slate + Jade White",
-    colors: {
-      frame: "#334155",
-      backplate: "#e2e8f0",
-      inlay: "#38bdf8",
-      camera_ring: "#0284c7",
-      buttons: "#38bdf8",
-    },
-  },
-  {
-    id: "walnut-gold",
-    name: "Walnut & Brass",
-    subtitle: "Laser Wood + Silk Gold",
-    colors: {
-      frame: "#1c1917",
-      backplate: "#78350f",
-      inlay: "#eab308",
-      camera_ring: "#eab308",
-      buttons: "#eab308",
-    },
-  },
+const COUPON_TYPES = [
+  { id: "camera", label: "Camera & Snap", desc: "Camera ring, backplate snap joint and nearest button" },
+  { id: "buttons", label: "Buttons", desc: "Real button pockets, buttons and the wall around them" },
+  { id: "ports", label: "Bottom Ports", desc: "Charging & speaker openings in the bottom wall" },
 ];
-
-const BAMBU_SWATCHES = [
-  { name: "Matte Charcoal", hex: "#1e293b" },
-  { name: "Bambu Cyan", hex: "#06b6d4" },
-  { name: "Bambu Orange", hex: "#f97316" },
-  { name: "Jade White", hex: "#e2e8f0" },
-  { name: "Crimson Red", hex: "#ef4444" },
-  { name: "Bambu Green", hex: "#10b981" },
-  { name: "Royal Indigo", hex: "#6366f1" },
-  { name: "Gold Silk", hex: "#eab308" },
-  { name: "Walnut Wood", hex: "#78350f" },
-];
-
-const PATTERN_CARDS = [
-  {
-    id: "hex",
-    name: "Hexagon Mesh",
-    desc: "Lightweight airflow honeycomb grid",
-    icon: (
-      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-        <path d="M12 2l5.2 3v6L12 14l-5.2-3V5L12 2z" />
-        <path d="M6.8 11l5.2 3v6l-5.2 3-5.2-3v-6l5.2-3z" />
-        <path d="M17.2 11l5.2 3v6l-5.2 3-5.2-3v-6l5.2-3z" />
-      </svg>
-    ),
-  },
-  {
-    id: "voronoi",
-    name: "Voronoi Cells",
-    desc: "Organic cellular lattice geometry",
-    icon: (
-      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-        <polygon points="4,4 13,3 11,11 3,12" />
-        <polygon points="13,3 21,6 19,15 11,11" />
-        <polygon points="3,12 11,11 13,20 5,21" />
-        <polygon points="11,11 19,15 20,21 13,20" />
-      </svg>
-    ),
-  },
-  {
-    id: "waves",
-    name: "Sine Waves",
-    desc: "Flowing acoustic ribbon bands",
-    icon: (
-      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-        <path d="M2 8c3-4 6-4 9 0s6 4 11 0" />
-        <path d="M2 14c3-4 6-4 9 0s6 4 11 0" />
-        <path d="M2 20c3-4 6-4 9 0s6 4 11 0" />
-      </svg>
-    ),
-  },
-  {
-    id: "grid",
-    name: "Diamond Grid",
-    desc: "Crisp angled lattice cross-mesh",
-    icon: (
-      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-        <path d="M12 2l8 10-8 10L4 12 12 2z" />
-        <path d="M8 7l8 10M16 7L8 17" />
-      </svg>
-    ),
-  },
-  {
-    id: "solid",
-    name: "Solid Armor",
-    desc: "Clean, full dust & impact shield",
-    icon: (
-      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-        <rect x="5" y="2" width="14" height="20" rx="3" />
-        <rect x="8" y="5" width="4" height="4" rx="1" />
-      </svg>
-    ),
-  },
-  {
-    id: "text",
-    name: "Text Monogram",
-    desc: "Custom lettering with stencil bridges",
-    icon: (
-      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-        <path d="M4 7V4h16v3M9 20h6M12 4v16" />
-      </svg>
-    ),
-  },
-  {
-    id: "svg",
-    name: "Vector SVG Art",
-    desc: "Upload or pick vector emblem art",
-    icon: (
-      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-        <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
-      </svg>
-    ),
-  },
-];
-
-const CALIBRATION_PROFILES = [
-  {
-    id: "h3c",
-    label: "H3C / Tool-Changer",
-    desc: "Co-printed multi-head tolerances",
-    clearances: {
-      frame_to_phone_offset: 0.25,
-      backplate_snap_clearance: 0.15,
-      button_clearance: 0.2,
-      camera_ring_clearance: 0.15,
-    },
-  },
-  {
-    id: "bambu_68d",
-    label: "Bambu AMS (68D)",
-    desc: "Rigid TPU 68D snap-fit clearances",
-    clearances: {
-      frame_to_phone_offset: 0.25,
-      backplate_snap_clearance: 0.15,
-      button_clearance: 0.2,
-      camera_ring_clearance: 0.15,
-    },
-  },
-  {
-    id: "soft_95a",
-    label: "Soft TPU 95A",
-    desc: "Tighter snap grip for flexible 95A",
-    clearances: {
-      frame_to_phone_offset: 0.15,
-      backplate_snap_clearance: 0.12,
-      button_clearance: 0.22,
-      camera_ring_clearance: 0.15,
-    },
-  },
-];
-
-const FINISH_MODES = [
-  { id: "through", label: "Through-Cut", desc: "Open vents & laser-ready profile" },
-  { id: "deboss", label: "Deboss", desc: "Recessed engraving on back face" },
-  { id: "inlay", label: "AMS Inlay", desc: "2-color flush 3MF insert" },
-];
-
-const DEFAULT_VISIBLE = {
-  frame: true,
-  backplate: true,
-  inlay: true,
-  camera_ring: true,
-  buttons: true,
-};
-
-function cleanDeviceName(name = "") {
-  return name.replace(" (approx - verify with calipers)", "");
-}
-
-function NumberField({ label, value, onChange, step = 0.1, min, max, unit = "mm" }) {
-  return (
-    <label className="flex flex-col gap-1">
-      <span className="text-[11px] text-slate-400">{label}</span>
-      <div className="flex items-center rounded-lg border border-slate-800 bg-slate-950 px-2.5 py-1.5 focus-within:border-cyan-500">
-        <input
-          type="number"
-          step={step}
-          min={min}
-          max={max}
-          value={Number.isFinite(value) ? value : 0}
-          onChange={(e) => {
-            const v = parseFloat(e.target.value);
-            if (!Number.isNaN(v)) onChange(v);
-          }}
-          className="w-full bg-transparent text-xs font-mono text-slate-100 outline-none"
-        />
-        {unit && <span className="ml-1 text-[10px] text-slate-500">{unit}</span>}
-      </div>
-    </label>
-  );
-}
-
-function SliderField({ label, value, onChange, min, max, step = 0.05, unit = "mm", hint }) {
-  return (
-    <div className="space-y-1.5">
-      <div className="flex items-center justify-between text-xs">
-        <span className="text-slate-300">{label}</span>
-        <span className="font-mono text-cyan-300">
-          {Number(value).toFixed(step >= 1 ? 0 : 2)} {unit}
-        </span>
-      </div>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value))}
-        className="h-1.5 w-full cursor-pointer rounded-lg bg-slate-800 accent-cyan-400"
-      />
-      {hint && <p className="text-[10px] text-slate-500">{hint}</p>}
-    </div>
-  );
-}
 
 export default function App() {
   const [presets, setPresets] = useState([]);
+  const [printers, setPrinters] = useState([]);
+  const [printerId, setPrinterId] = useState("generic_256");
   const [config, setConfig] = useState(null);
-  const [preview, setPreview] = useState(null);
 
   // Progressive Disclosure: Simple Wizard (default) vs Pro CAD Mode
   const [uiMode, setUiMode] = useState("simple"); // 'simple' | 'pro'
@@ -324,177 +61,91 @@ export default function App() {
   const [activeCalId, setActiveCalId] = useState("h3c");
   const [colors, setColors] = useState(FILAMENT_THEMES[0].colors);
   const [visibleGroups, setVisibleGroups] = useState(DEFAULT_VISIBLE);
+  const [couponType, setCouponType] = useState("camera");
 
-  // Request Status
-  const [loading, setLoading] = useState(false);
-  const [exporting, setExporting] = useState(null); // null | 'full' | 'coupon'
+  // Request status: preview requests live in usePreview; this is for load/export/import errors
   const [error, setError] = useState(null);
-  const [dirty, setDirty] = useState(false);
+  const delayRef = useRef(0); // debounce for the NEXT preview request (ms)
 
-  const debounceRef = useRef(null);
-  const requestIdRef = useRef(0);
-
-  const runGenerate = useCallback(async (payload) => {
-    if (!payload) return;
-    const reqId = ++requestIdRef.current;
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch("/api/generate-preview", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || `Server error (${res.status})`);
-      }
-      const data = await res.json();
-      if (reqId === requestIdRef.current) {
-        setPreview(data);
-        setDirty(false);
-      }
-    } catch (err) {
-      if (reqId === requestIdRef.current) {
-        setError(err.message);
-      }
-    } finally {
-      if (reqId === requestIdRef.current) {
-        setLoading(false);
-      }
-    }
-  }, []);
+  const { preview, status, error: previewError, invalid, isCurrent, refresh } = usePreview(
+    config,
+    printerId,
+    delayRef
+  );
+  const findings = isCurrent ? preview?.findings : null;
+  const vState = validationState({ status, error: previewError, invalid, findings });
+  const canExport = Boolean(config && isCurrent && !preview?.export_blocked);
+  const exportBlockedReason = !canExport
+    ? status === "loading"
+      ? "Waiting for the preview of the current design"
+      : "Fix the findings shown in the validation status first"
+    : undefined;
+  const { exporting, exportZip, exportPart } = useExports({
+    config,
+    printerId,
+    canExport,
+    onError: setError,
+  });
+  const printer = useMemo(() => printers.find((p) => p.id === printerId), [printers, printerId]);
+  const loading = status === "loading";
+  const dirty = !isCurrent;
 
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch("/api/presets");
+        const [res, pres] = await Promise.all([fetch("/api/presets"), fetch("/api/printers")]);
         if (!res.ok) throw new Error("Failed to load presets");
         const data = await res.json();
         setPresets(data.presets);
-        const initial =
-          data.presets.find((p) => p.id === data.default_id) || data.presets[0];
+        if (pres.ok) {
+          const pdata = await pres.json();
+          setPrinters(pdata.printers);
+          setPrinterId(pdata.default_id);
+        }
+        const initial = data.presets.find((p) => p.id === data.default_id) || data.presets[0];
         if (initial) {
-          const clone = structuredClone(initial);
-          setConfig(clone);
-          runGenerate(clone);
+          delayRef.current = 0;
+          setConfig(structuredClone(initial));
         }
       } catch (err) {
         setError(err.message);
       }
     })();
-  }, [runGenerate]);
+  }, []);
 
-  const updateConfig = useCallback(
-    (updater, immediate = false) => {
-      setConfig((prev) => {
-        if (!prev) return prev;
-        const next =
-          typeof updater === "function"
-            ? updater(structuredClone(prev))
-            : updater;
-        setDirty(true);
-        if (debounceRef.current) clearTimeout(debounceRef.current);
-        debounceRef.current = setTimeout(
-          () => runGenerate(next),
-          immediate ? 30 : 480
-        );
-        return next;
-      });
-    },
-    [runGenerate]
-  );
+  const updateConfig = useCallback((updater, immediate = false) => {
+    setConfig((prev) => {
+      if (!prev) return prev;
+      delayRef.current = immediate ? 30 : 450;
+      return typeof updater === "function" ? updater(structuredClone(prev)) : updater;
+    });
+  }, []);
+
+  const replaceConfig = (next) => {
+    delayRef.current = 0;
+    setError(null);
+    setConfig(next);
+  };
+
+  const handleSelectPrinter = (id) => {
+    delayRef.current = 0;
+    setPrinterId(id);
+  };
 
   const handleSelectPreset = (id) => {
     const found = presets.find((p) => p.id === id);
     if (!found) return;
     const next = structuredClone(found);
     if (config?.pattern) next.pattern = structuredClone(config.pattern);
-    setConfig(next);
-    setDirty(false);
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    runGenerate(next);
-  };
-
-  const handleSelectPatternType = (ptype) => {
-    updateConfig((c) => {
-      c.pattern.type = ptype;
-      if (ptype === "hex") {
-        c.pattern.params = { pitch: c.pattern.params?.pitch || 9.0 };
-      } else if (ptype === "voronoi") {
-        c.pattern.params = {
-          pitch: c.pattern.params?.pitch || 11.0,
-          seed: c.pattern.params?.seed ?? 42,
-        };
-      } else if (ptype === "waves") {
-        c.pattern.params = {
-          pitch: c.pattern.params?.pitch || 7.0,
-          amplitude: c.pattern.params?.amplitude ?? 3.5,
-          wavelength: c.pattern.params?.wavelength ?? 28.0,
-        };
-      } else if (ptype === "grid") {
-        c.pattern.params = {
-          pitch: c.pattern.params?.pitch || 8.5,
-          angle: c.pattern.params?.angle ?? 45.0,
-        };
-      } else if (ptype === "text") {
-        c.pattern.params = {
-          text: c.pattern.params?.text || "CASECRAFT",
-          size: c.pattern.params?.size ?? 0.65,
-          rotation: c.pattern.params?.rotation ?? 0,
-          bold: c.pattern.params?.bold ?? true,
-        };
-      } else if (ptype === "svg") {
-        c.pattern.params = {
-          svg: c.pattern.params?.svg || SAMPLE_SVGS.star.svg,
-          size: c.pattern.params?.size ?? 0.6,
-        };
-      }
-      return c;
-    }, true);
-  };
-
-  const handleExportPart = async (partKey, filenameSuffix) => {
-    if (!config) return;
-    setExporting(partKey);
-    setError(null);
-    try {
-      const res = await fetch(`/api/export-part?part=${partKey}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(config),
-      });
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || `Part export failed (${res.status})`);
-      }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${config.id}_${filenameSuffix}`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setExporting(null);
-    }
+    replaceConfig(next);
   };
 
   const handleExportPresetJson = () => {
     if (!config) return;
-    const blob = new Blob([JSON.stringify(config, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${config.id}_preset.json`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    downloadBlob(
+      new Blob([JSON.stringify(config, null, 2)], { type: "application/json" }),
+      `${config.id}_preset.json`
+    );
   };
 
   const handleImportPresetJson = (e) => {
@@ -503,10 +154,7 @@ export default function App() {
     const reader = new FileReader();
     reader.onload = () => {
       try {
-        const parsed = JSON.parse(String(reader.result || "{}"));
-        setConfig(parsed);
-        setDirty(false);
-        runGenerate(parsed);
+        replaceConfig(JSON.parse(String(reader.result || "{}")));
       } catch {
         setError("Invalid preset JSON file.");
       }
@@ -514,501 +162,19 @@ export default function App() {
     reader.readAsText(file);
   };
 
-  const handleExportZip = async (coupon = false) => {
-    if (!config) return;
-    setExporting(coupon ? "coupon" : "full");
-    setError(null);
-    try {
-      const res = await fetch(`/api/export-zip?coupon=${coupon}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(config),
-      });
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || `Export failed (${res.status})`);
-      }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = coupon
-        ? `${config.id}_coupon_bundle.zip`
-        : `${config.id}_casecraft_bundle.zip`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setExporting(null);
-    }
-  };
+  const handleExportZip = (coupon = false) => exportZip(coupon, couponType);
+  const handleExportPart = exportPart;
 
   const handleDownloadLaserSvg = () => {
-    if (!preview?.laser_svg || !config) return;
-    const blob = new Blob([preview.laser_svg], { type: "image/svg+xml" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${config.id}_Laser_Backplate.svg`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    if (!preview?.laser_svg || !config || !isCurrent) return;
+    downloadBlob(new Blob([preview.laser_svg], { type: "image/svg+xml" }), `${config.id}_Laser_Backplate.svg`);
   };
 
-  const handleSvgUpload = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      updateConfig((c) => {
-        c.pattern.type = "svg";
-        c.pattern.params = {
-          ...c.pattern.params,
-          svg: String(reader.result || ""),
-          size: c.pattern.params?.size ?? 0.65,
-        };
-        return c;
-      }, true);
-    };
-    reader.readAsText(file);
-  };
-
-  const renderPatternControls = () => {
-    if (!config) return null;
-    return (
-      <div className="space-y-4">
-        {/* Visual Pattern Cards */}
-        <div className="grid grid-cols-2 gap-2.5">
-          {PATTERN_CARDS.map((card) => {
-            const active = config.pattern.type === card.id;
-            return (
-              <button
-                key={card.id}
-                type="button"
-                onClick={() => handleSelectPatternType(card.id)}
-                className={`rounded-xl border p-3 text-left transition-all ${
-                  active
-                    ? "border-cyan-400 bg-cyan-500/10 ring-1 ring-cyan-400/25"
-                    : "border-slate-800 bg-slate-900/70 hover:border-slate-700"
-                }`}
-              >
-                <div
-                  className={`mb-2 flex h-9 w-9 items-center justify-center rounded-lg ${
-                    active
-                      ? "bg-cyan-500/20 text-cyan-300"
-                      : "bg-slate-800 text-slate-400"
-                  }`}
-                >
-                  {card.icon}
-                </div>
-                <div className="text-xs font-semibold text-white">
-                  {card.name}
-                </div>
-                <div className="mt-0.5 text-[11px] leading-snug text-slate-400">
-                  {card.desc}
-                </div>
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Finish / Extrusion Pills */}
-        {config.pattern.type !== "solid" && (
-          <div className="space-y-3 border-t border-slate-800/80 pt-4">
-            <div className="space-y-1.5">
-              <span className="text-xs font-semibold text-slate-300">
-                Backplate Finish
-              </span>
-              <div className="grid grid-cols-3 gap-2">
-                {FINISH_MODES.map((m) => {
-                  const active = config.pattern.mode === m.id;
-                  return (
-                    <button
-                      key={m.id}
-                      type="button"
-                      onClick={() =>
-                        updateConfig((c) => {
-                          c.pattern.mode = m.id;
-                          return c;
-                        }, true)
-                      }
-                      className={`rounded-lg border px-2.5 py-2 text-center transition ${
-                        active
-                          ? "border-cyan-400 bg-cyan-500/15 text-cyan-200"
-                          : "border-slate-800 bg-slate-950/60 text-slate-400 hover:text-slate-200"
-                      }`}
-                    >
-                      <div className="text-xs font-semibold">{m.label}</div>
-                    </button>
-                  );
-                })}
-              </div>
-              <p className="text-[11px] text-slate-500">
-                {FINISH_MODES.find((m) => m.id === config.pattern.mode)?.desc}
-              </p>
-            </div>
-
-            {/* Contextual Pattern Settings */}
-            {config.pattern.type === "hex" && (
-              <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3.5">
-                <SliderField
-                  label="Hex Cell Spacing (Pitch)"
-                  value={config.pattern.params?.pitch ?? 9.0}
-                  min={5.5}
-                  max={16.0}
-                  step={0.5}
-                  hint="Smaller pitch = finer honeycomb mesh"
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.params = { ...c.pattern.params, pitch: v };
-                      return c;
-                    })
-                  }
-                />
-              </div>
-            )}
-
-            {config.pattern.type === "voronoi" && (
-              <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3.5">
-                <SliderField
-                  label="Voronoi Cell Spacing"
-                  value={config.pattern.params?.pitch ?? 11.0}
-                  min={7.0}
-                  max={18.0}
-                  step={0.5}
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.params = { ...c.pattern.params, pitch: v };
-                      return c;
-                    })
-                  }
-                />
-                <SliderField
-                  label="Pattern Seed"
-                  value={config.pattern.params?.seed ?? 42}
-                  min={1}
-                  max={99}
-                  step={1}
-                  unit=""
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.params = { ...c.pattern.params, seed: v };
-                      return c;
-                    })
-                  }
-                />
-              </div>
-            )}
-
-            {config.pattern.type === "waves" && (
-              <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3.5">
-                <SliderField
-                  label="Wave Spacing (Pitch)"
-                  value={config.pattern.params?.pitch ?? 7.0}
-                  min={4.5}
-                  max={14.0}
-                  step={0.5}
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.params = { ...c.pattern.params, pitch: v };
-                      return c;
-                    })
-                  }
-                />
-                <SliderField
-                  label="Wave Amplitude"
-                  value={config.pattern.params?.amplitude ?? 3.5}
-                  min={1.0}
-                  max={8.0}
-                  step={0.5}
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.params = { ...c.pattern.params, amplitude: v };
-                      return c;
-                    })
-                  }
-                />
-              </div>
-            )}
-
-            {config.pattern.type === "grid" && (
-              <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3.5">
-                <SliderField
-                  label="Grid Spacing (Pitch)"
-                  value={config.pattern.params?.pitch ?? 8.5}
-                  min={5.5}
-                  max={16.0}
-                  step={0.5}
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.params = { ...c.pattern.params, pitch: v };
-                      return c;
-                    })
-                  }
-                />
-                <SliderField
-                  label="Grid Angle"
-                  value={config.pattern.params?.angle ?? 45.0}
-                  min={0}
-                  max={90}
-                  step={15}
-                  unit="°"
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.params = { ...c.pattern.params, angle: v };
-                      return c;
-                    })
-                  }
-                />
-              </div>
-            )}
-
-            {config.pattern.type === "text" && (
-              <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3.5">
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-xs font-medium text-slate-300">
-                    Monogram Text
-                  </span>
-                  <input
-                    type="text"
-                    maxLength={18}
-                    value={config.pattern.params?.text ?? "CASECRAFT"}
-                    onChange={(e) =>
-                      updateConfig((c) => {
-                        c.pattern.params = {
-                          ...c.pattern.params,
-                          text: e.target.value,
-                        };
-                        return c;
-                      })
-                    }
-                    className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-mono text-white outline-none focus:border-cyan-400"
-                  />
-                </label>
-                <SliderField
-                  label="Text Scale"
-                  value={config.pattern.params?.size ?? 0.65}
-                  min={0.25}
-                  max={0.9}
-                  step={0.05}
-                  unit="×"
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.params = { ...c.pattern.params, size: v };
-                      return c;
-                    })
-                  }
-                />
-                <SliderField
-                  label="Rotation"
-                  value={config.pattern.params?.rotation ?? 0}
-                  min={-90}
-                  max={90}
-                  step={5}
-                  unit="°"
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.params = { ...c.pattern.params, rotation: v };
-                      return c;
-                    })
-                  }
-                />
-                <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(config.pattern.params?.bold ?? true)}
-                    onChange={(e) =>
-                      updateConfig((c) => {
-                        c.pattern.params = {
-                          ...c.pattern.params,
-                          bold: e.target.checked,
-                        };
-                        return c;
-                      }, true)
-                    }
-                    className="accent-cyan-400"
-                  />
-                  Bold Font Weight
-                </label>
-              </div>
-            )}
-
-            {config.pattern.type === "svg" && (
-              <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3.5">
-                <label className="flex cursor-pointer items-center justify-center gap-2 rounded-lg border border-dashed border-cyan-500/50 bg-cyan-500/5 px-3 py-2.5 text-xs font-medium text-cyan-300 hover:bg-cyan-500/10 transition">
-                  <Upload className="h-3.5 w-3.5" />
-                  Upload Custom .SVG Artwork
-                  <input
-                    type="file"
-                    accept=".svg,image/svg+xml"
-                    onChange={handleSvgUpload}
-                    className="hidden"
-                  />
-                </label>
-
-                <div className="space-y-1.5">
-                  <span className="text-[11px] text-slate-400">
-                    Quick Vector Emblems
-                  </span>
-                  <div className="grid grid-cols-3 gap-1.5">
-                    {Object.entries(SAMPLE_SVGS).map(([k, item]) => (
-                      <button
-                        key={k}
-                        type="button"
-                        onClick={() =>
-                          updateConfig((c) => {
-                            c.pattern.params = {
-                              ...c.pattern.params,
-                              svg: item.svg,
-                              size: c.pattern.params?.size ?? 0.6,
-                            };
-                            return c;
-                          }, true)
-                        }
-                        className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-[11px] text-slate-300 hover:border-cyan-500 transition"
-                      >
-                        {item.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <SliderField
-                  label="Artwork Scale"
-                  value={config.pattern.params?.size ?? 0.6}
-                  min={0.25}
-                  max={0.9}
-                  step={0.05}
-                  unit="×"
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.params = { ...c.pattern.params, size: v };
-                      return c;
-                    })
-                  }
-                />
-              </div>
-            )}
-
-            {config.pattern.mode === "through" &&
-              (config.pattern.type === "text" || config.pattern.type === "svg") && (
-                <label className="flex cursor-pointer items-center justify-between rounded-xl border border-slate-800 bg-slate-900/70 px-3.5 py-2.5">
-                  <div>
-                    <div className="text-xs font-medium text-slate-200">
-                      Auto Stencil Bridges
-                    </div>
-                    <div className="text-[11px] text-slate-400">
-                      Anchors inner islands of O / A / B cutouts
-                    </div>
-                  </div>
-                  <input
-                    type="checkbox"
-                    checked={Boolean(config.pattern.stencil_bridges ?? true)}
-                    onChange={(e) =>
-                      updateConfig((c) => {
-                        c.pattern.stencil_bridges = e.target.checked;
-                        return c;
-                      }, true)
-                    }
-                    className="h-4 w-4 accent-cyan-400"
-                  />
-                </label>
-              )}
-
-            {/* Advanced pattern parameters only in Pro Mode */}
-            {uiMode === "pro" && (
-              <div className="space-y-3 border-t border-slate-800/80 pt-3">
-                <SliderField
-                  label="Edge Margin"
-                  value={config.pattern.margin}
-                  min={1.5}
-                  max={10.0}
-                  step={0.5}
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.margin = v;
-                      return c;
-                    })
-                  }
-                />
-                <SliderField
-                  label="Min Web Ligament"
-                  value={config.pattern.web}
-                  min={1.0}
-                  max={4.0}
-                  step={0.1}
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.web = v;
-                      return c;
-                    })
-                  }
-                />
-                {config.pattern.mode !== "through" && (
-                  <SliderField
-                    label="Deboss / Inlay Depth"
-                    value={config.pattern.depth}
-                    min={0.4}
-                    max={Math.max(0.4, (config.style?.backplate_thickness ?? 1.8) - 0.6)}
-                    step={0.1}
-                    onChange={(v) =>
-                      updateConfig((c) => {
-                        c.pattern.depth = v;
-                        return c;
-                      })
-                    }
-                  />
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* MagSafe Magnet Ring Pocket Toggle */}
-        <label className="flex cursor-pointer items-center justify-between rounded-xl border border-slate-800 bg-slate-900/75 px-3.5 py-3">
-          <div>
-            <div className="text-xs font-semibold text-white">
-              Internal MagSafe Ring Pocket
-            </div>
-            <div className="text-[11px] text-slate-400">
-              {config.style?.magsafe_depth ?? 0.75} mm recessed 54/46 mm magnet ring + alignment tail
-            </div>
-          </div>
-          <input
-            type="checkbox"
-            checked={Boolean(config.style?.magsafe_ring)}
-            onChange={(e) =>
-              updateConfig((c) => {
-                c.style.magsafe_ring = e.target.checked;
-                return c;
-              }, true)
-            }
-            className="h-4 w-4 accent-cyan-400"
-          />
-        </label>
-        {config.style?.magsafe_ring && (
-          <SliderField
-            label="MagSafe Ring Vertical Offset"
-            value={config.style?.magsafe_offset_y ?? 0}
-            min={-30}
-            max={30}
-            step={0.5}
-            hint="Negative moves the ring toward the bottom. Match your phone's charging coil and keep clear of the camera."
-            onChange={(v) =>
-              updateConfig((c) => {
-                c.style.magsafe_offset_y = v;
-                return c;
-              })
-            }
-          />
-        )}
-      </div>
-    );
-  };
+  const setCameraOpening = (key, value) =>
+    updateConfig((c) => {
+      c.camera.opening = { width: 0, height: 0, radius: 0, dx: 0, dy: 0, ...(c.camera.opening || {}), [key]: value };
+      return c;
+    });
 
   const hasInlay = Boolean(
     preview?.summary?.has_inlay ||
@@ -1018,7 +184,7 @@ export default function App() {
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-slate-950 text-slate-100 select-none">
       {/* ==================== CLEAN SINGLE-ROW HEADER ==================== */}
-      <header className="z-20 flex min-h-14 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 bg-slate-900/85 px-4 py-2 backdrop-blur-md">
+      <header className="z-30 flex min-h-14 shrink-0 flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 bg-slate-900/85 px-4 py-2 backdrop-blur-md">
         {/* Left: Brand Identity + Device Pill */}
         <div className="flex items-center gap-2.5">
           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-cyan-500/30 bg-gradient-to-br from-cyan-500/20 to-teal-500/10 text-cyan-400">
@@ -1034,6 +200,7 @@ export default function App() {
                   {cleanDeviceName(config.name)}
                 </span>
               )}
+              {config && <DeviceBadge verification={config.verification} />}
             </div>
             <p className="hidden xl:block text-[11px] text-slate-400">
               Modular 4-Part Snap-Fit CAD Generator
@@ -1074,7 +241,7 @@ export default function App() {
           <button
             type="button"
             disabled={!config || loading}
-            onClick={() => runGenerate(config)}
+            onClick={refresh}
             className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg border px-2.5 py-1.5 text-xs font-medium transition disabled:opacity-50 ${
               dirty
                 ? "border-amber-500/50 bg-amber-500/15 text-amber-300 hover:bg-amber-500/25"
@@ -1089,9 +256,13 @@ export default function App() {
             {loading ? "Solving…" : "Rebuild"}
           </button>
 
+          <PrinterSelect printers={printers} value={printerId} onChange={handleSelectPrinter} />
+          <ValidationStatus state={vState} />
+
           <button
             type="button"
-            disabled={!config || exporting !== null}
+            disabled={!canExport || exporting !== null}
+            title={exportBlockedReason || COUPON_TYPES.find((c) => c.id === couponType)?.desc}
             onClick={() => handleExportZip(true)}
             className="flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-700 bg-slate-800/90 px-2.5 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700/80 disabled:opacity-50 transition"
           >
@@ -1100,12 +271,13 @@ export default function App() {
             ) : (
               <Download className="h-3.5 w-3.5 text-amber-400" />
             )}
-            10-Min Fit Coupon
+            Fit Coupon
           </button>
 
           <button
             type="button"
-            disabled={!config || exporting !== null}
+            disabled={!canExport || exporting !== null}
+            title={exportBlockedReason}
             onClick={() => handleExportZip(false)}
             className="flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-cyan-500 px-3 py-1.5 text-xs font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 hover:bg-cyan-400 disabled:opacity-50 transition"
           >
@@ -1224,6 +396,7 @@ export default function App() {
                                   <div className="mt-0.5 font-mono text-[11px] text-slate-400">
                                     {p.body.length} × {p.body.width} × {p.body.thickness} mm
                                   </div>
+                                  <DeviceBadge verification={p.verification} className="mt-1.5 inline-block" />
                                 </div>
                               </button>
                             );
@@ -1264,7 +437,7 @@ export default function App() {
                             Customize the snap-in rigid backplate pattern or laser-cut outline.
                           </p>
                         </div>
-                        {renderPatternControls()}
+                        {<PatternControls config={config} updateConfig={updateConfig} uiMode={uiMode} />}
                       </div>
                     )}
 
@@ -1359,6 +532,17 @@ export default function App() {
                           </div>
                         </div>
 
+                        {/* Printer profile (drives plate size, layout and print modes) */}
+                        <div className="flex items-center justify-between gap-2 rounded-xl border border-slate-800 bg-slate-900/70 p-3.5">
+                          <div>
+                            <div className="text-xs font-semibold text-slate-300">Printer</div>
+                            <div className="text-[11px] text-slate-400">
+                              {printer ? `${printer.bed_x} × ${printer.bed_y} mm plate${printer.toolchanger ? " · toolchanger" : ""}` : "…"}
+                            </div>
+                          </div>
+                          <PrinterSelect printers={printers} value={printerId} onChange={handleSelectPrinter} />
+                        </div>
+
                         {/* Printer Calibration Presets */}
                         <div className="space-y-2 rounded-xl border border-slate-800 bg-slate-900/70 p-3.5">
                           <div className="text-xs font-semibold text-slate-300">
@@ -1399,17 +583,27 @@ export default function App() {
                         {/* Tool-Changer & 1-Piece Export Card */}
                         <div className="space-y-2.5 rounded-xl border border-indigo-500/30 bg-gradient-to-br from-indigo-950/35 to-slate-900 p-3.5">
                           <div>
-                            <div className="text-xs font-semibold uppercase tracking-wider text-indigo-300">
+                            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-indigo-300">
                               Tool-Changer / Single-Piece Print
+                              <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-semibold normal-case tracking-normal text-amber-300">
+                                Print-in-place: experimental
+                              </span>
                             </div>
                             <p className="mt-0.5 text-[11px] text-slate-300">
-                              Co-printed multi-toolhead assembly (H3C) or fused 1-piece TPU unibody.
+                              Co-printed multi-toolhead assembly (toolchanger printers only) or a 1-piece TPU unibody.
                             </p>
+                            {!printer?.toolchanger && (
+                              <p className="mt-1 text-[11px] text-amber-300/90">
+                                Select a toolchanger printer profile (Bambu Lab H3C) to enable the co-printed export.
+                              </p>
+                            )}
                           </div>
                           <button
                             type="button"
-                            disabled={exporting !== null}
+                            disabled={!canExport || exporting !== null}
+                            title={exportBlockedReason}
                             onClick={() => handleExportPart("toolchanger_3mf", "Toolchanger_InPlace.3mf")}
+                            hidden={!printer?.toolchanger}
                             className="flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-500 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-400 transition disabled:opacity-50"
                           >
                             <Download className="h-3.5 w-3.5" />
@@ -1419,15 +613,23 @@ export default function App() {
                           </button>
                           <button
                             type="button"
-                            disabled={exporting !== null}
+                            disabled={!canExport || exporting !== null}
+                            title={exportBlockedReason}
                             onClick={() => handleExportPart("unibody_stl", "Unibody_OnePiece.stl")}
                             className="flex w-full items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-900/90 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-800 transition disabled:opacity-50"
                           >
                             <Download className="h-3.5 w-3.5 text-indigo-300" />
                             {exporting === "unibody_stl"
                               ? "Generating Unibody…"
-                              : "Download 1-Piece Fused Unibody (.stl)"}
+                              : "Download 1-Piece Unibody (.stl)"}
                           </button>
+                          {isCurrent && preview?.unibody_notes?.length > 0 && (
+                            <ul className="list-disc space-y-0.5 pl-4 text-[10px] leading-snug text-slate-400">
+                              {preview.unibody_notes.map((n) => (
+                                <li key={n}>{n.replace(/^Unibody: /, "")}</li>
+                              ))}
+                            </ul>
+                          )}
                         </div>
 
                         {/* 4-Part Modular Bundle Card */}
@@ -1437,13 +639,17 @@ export default function App() {
                               4-Part Modular Slicer Bundle
                             </div>
                             <p className="mt-1 text-xs text-slate-300">
-                              Pre-oriented flat on Z=0, support-free, packaged as `.3mf`, `.stl`, `.step`, and laser `.svg`.
+                              Pre-oriented flat on Z=0, laid out for {printer?.name || "the selected printer"}, packaged as `.3mf`, `.stl`, `.step`, and laser `.svg`.
                             </p>
+                            <div className="mt-2">
+                              <ValidationStatus state={vState} align="left" />
+                            </div>
                           </div>
 
                           <button
                             type="button"
-                            disabled={exporting !== null}
+                            disabled={!canExport || exporting !== null}
+                            title={exportBlockedReason}
                             onClick={() => handleExportZip(false)}
                             className="flex w-full items-center justify-center gap-2 rounded-xl bg-cyan-500 px-4 py-2.5 text-xs font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 hover:bg-cyan-400 transition disabled:opacity-50"
                           >
@@ -1455,15 +661,36 @@ export default function App() {
 
                           <button
                             type="button"
-                            disabled={exporting !== null}
+                            disabled={!canExport || exporting !== null}
+                            title={exportBlockedReason}
                             onClick={() => handleExportZip(true)}
                             className="flex w-full items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-900/90 px-3 py-2 text-xs font-medium text-slate-200 hover:bg-slate-800 transition disabled:opacity-50"
                           >
                             <Download className="h-3.5 w-3.5 text-amber-400" />
                             {exporting === "coupon"
                               ? "Packaging Coupon…"
-                              : "Download 10-Min Fit-Test Coupon (.zip)"}
+                              : `Download ${COUPON_TYPES.find((c) => c.id === couponType)?.label} Fit-Test Coupon (.zip)`}
                           </button>
+                          <div className="grid grid-cols-3 gap-1.5">
+                            {COUPON_TYPES.map((ct) => (
+                              <button
+                                key={ct.id}
+                                type="button"
+                                title={ct.desc}
+                                onClick={() => setCouponType(ct.id)}
+                                className={`rounded-lg border px-2 py-1.5 text-[11px] font-medium transition ${
+                                  couponType === ct.id
+                                    ? "border-amber-400/60 bg-amber-500/10 text-amber-200"
+                                    : "border-slate-800 bg-slate-950/70 text-slate-400 hover:text-slate-200"
+                                }`}
+                              >
+                                {ct.label}
+                              </button>
+                            ))}
+                          </div>
+                          <p className="text-[10px] text-slate-500">
+                            {COUPON_TYPES.find((c) => c.id === couponType)?.desc}. Print it before a full case; slice it to see the print time.
+                          </p>
                         </div>
 
                         {/* Quick Single-Part Re-Print Pills */}
@@ -1482,7 +709,8 @@ export default function App() {
                               <button
                                 key={item.key}
                                 type="button"
-                                disabled={exporting !== null}
+                                disabled={!canExport || exporting !== null}
+                            title={exportBlockedReason}
                                 onClick={() => handleExportPart(item.key, item.file)}
                                 className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-[11px] font-medium text-slate-200 hover:border-cyan-500 transition disabled:opacity-50"
                               >
@@ -1522,7 +750,8 @@ export default function App() {
                 ) : (
                   <button
                     type="button"
-                    disabled={exporting !== null}
+                    disabled={!canExport || exporting !== null}
+                            title={exportBlockedReason}
                     onClick={() => handleExportZip(false)}
                     className="rounded-lg bg-emerald-400 px-4 py-1.5 text-xs font-semibold text-slate-950 hover:bg-emerald-300 transition disabled:opacity-50"
                   >
@@ -1724,6 +953,43 @@ export default function App() {
                               }
                             />
                           </div>
+                          <label className="flex cursor-pointer items-center gap-2 text-[11px] text-slate-300">
+                            <input
+                              type="checkbox"
+                              checked={Boolean(config.camera.opening)}
+                              onChange={(e) =>
+                                updateConfig((c) => {
+                                  c.camera.opening = e.target.checked
+                                    ? { width: c.camera.width, height: c.camera.height, radius: c.camera.radius, dx: 0, dy: 0 }
+                                    : null;
+                                  return c;
+                                }, true)
+                              }
+                              className="accent-cyan-400"
+                            />
+                            Separate outer-opening profile (island wider at its base, or flared opening)
+                          </label>
+                          {config.camera.opening && (
+                            <div className="grid grid-cols-3 gap-2 rounded-lg border border-slate-800 bg-slate-950/50 p-2">
+                              {[
+                                ["width", "Opening W"],
+                                ["height", "Opening H"],
+                                ["radius", "Opening R"],
+                                ["dx", "Shift X"],
+                                ["dy", "Shift Y"],
+                              ].map(([k, label]) => (
+                                <NumberField
+                                  key={k}
+                                  label={label}
+                                  value={config.camera.opening[k]}
+                                  onChange={(v) => setCameraOpening(k, v)}
+                                />
+                              ))}
+                              <p className="col-span-3 text-[10px] text-slate-500">
+                                Width/Height above = island at its base; this is the clear opening at the outer face. Shift is measured on the back view (+X right, +Y down).
+                              </p>
+                            </div>
+                          )}
                         </section>
 
                         {/* Floating Buttons */}
@@ -2080,7 +1346,7 @@ export default function App() {
                     )}
 
                     {/* PRO TAB 3: PATTERN */}
-                    {proTab === "pattern" && renderPatternControls()}
+                    {proTab === "pattern" && <PatternControls config={config} updateConfig={updateConfig} uiMode={uiMode} />}
 
                     {/* PRO TAB 4: COLORS */}
                     {proTab === "colors" && (
@@ -2150,8 +1416,13 @@ export default function App() {
             {/* Top-Left Summary / Bed Pill */}
             <div className="pointer-events-auto flex flex-wrap items-center gap-1.5">
               {viewMode === "bed" && (
-                <span className="rounded-lg border border-cyan-500/40 bg-slate-900/85 px-2.5 py-1.5 text-xs font-medium text-cyan-300 shadow backdrop-blur-md">
-                  Bambu 256×256 mm Build Plate (Z=0)
+                <span
+                  className={`rounded-lg border bg-slate-900/85 px-2.5 py-1.5 text-xs font-medium shadow backdrop-blur-md ${
+                    preview?.bed?.fits === false ? "border-rose-500/60 text-rose-300" : "border-cyan-500/40 text-cyan-300"
+                  }`}
+                >
+                  {preview?.printer?.name || "Build plate"} · {preview?.bed?.x ?? 256}×{preview?.bed?.y ?? 256} mm
+                  {preview?.bed?.fits === false ? " · parts do not fit" : " · Case_Set.3mf layout"}
                 </span>
               )}
               {preview?.summary && (
@@ -2230,10 +1501,10 @@ export default function App() {
           </div>
 
           {/* Error Toast Banner */}
-          {error && (
+          {(error || previewError) && (
             <div className="absolute top-20 right-3 z-20 max-w-md rounded-xl border border-rose-500/40 bg-rose-950/90 px-3.5 py-2 text-xs text-rose-200 shadow-xl backdrop-blur">
               <strong className="font-semibold">Validation / CAD Error: </strong>
-              {error}
+              {error || previewError}
             </div>
           )}
 
@@ -2250,7 +1521,7 @@ export default function App() {
                 </div>
                 <button
                   type="button"
-                  disabled={!preview?.laser_svg}
+                  disabled={!preview?.laser_svg || !isCurrent}
                   onClick={handleDownloadLaserSvg}
                   className="flex items-center gap-1.5 rounded-lg bg-rose-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-400 disabled:opacity-50"
                 >
@@ -2278,6 +1549,7 @@ export default function App() {
                 colors={colors}
                 visibleGroups={visibleGroups}
                 showPhoneGhost={showPhoneGhost}
+                bed={preview?.bed}
                 hideHud
               />
 

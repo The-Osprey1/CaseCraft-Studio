@@ -743,11 +743,10 @@ def _label(shape, name):
     return shape
 
 
-def export_set(p: Preset, out_dir: str | Path) -> dict:
-    """Build all parts, write STL+STEP per part, Full_Assembly.step, Laser_Backplate.svg."""
-    out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    timings, files = {}, []
+def build_case_parts(p: Preset) -> dict:
+    """All modular parts in design pose and print pose. Single source for preview, export and
+    3MF fixtures, so the preview always shows exactly what is exported."""
+    timings = {}
 
     def timed(name, fn):
         t = time.perf_counter()
@@ -759,18 +758,33 @@ def export_set(p: Preset, out_dir: str | Path) -> dict:
     plate, inlay = timed("backplate", lambda: generate_backplate(p))
     ring = timed("camera_ring", lambda: generate_camera_ring(p))
     btns = timed("buttons", lambda: generate_buttons(p))
-
-    parts = {
+    oriented = {
         "Frame_TPU": orient_for_print(frame, rot=(0, 0, 0)),       # BACK-DOWN: rear face on bed, lip prints last
         "Backplate_PLA": orient_for_print(plate, rot=(0, 0, 0)),   # outer face on bed
         "CameraRing": orient_for_print(ring, rot=(0, 0, 0)),       # bezel on bed
     }
     if btns:
-        oriented = [button_print_shape(p, b) for b in p.buttons]
-        parts["Buttons"] = Compound(layout_row(oriented), label="Buttons")
+        oriented["Buttons"] = Compound(layout_row([button_print_shape(p, b) for b in p.buttons]), label="Buttons")
     if inlay is not None:
-        parts["Backplate_Inlay"] = orient_for_print(inlay, rot=(0, 0, 0), ref=plate)  # same transform as plate
+        oriented["Backplate_Inlay"] = orient_for_print(inlay, rot=(0, 0, 0), ref=plate)  # same transform as plate
+    design = {"frame": frame, "plate": plate, "inlay": inlay, "ring": ring, "buttons": btns}
+    return {"design": design, "oriented": oriented, "timings": timings}
 
+
+def export_set(p: Preset, out_dir: str | Path, printer=None) -> dict:
+    """Build all parts, write STL+STEP per part, Full_Assembly.step, Laser_Backplate.svg, the
+    3MF set laid out on the selected printer's plate (BedOverflow if it does not fit), the
+    print-in-place 3MF + gap report (toolchanger printers only) and the verified unibody."""
+    import bambu_3mf
+    from printers import PrinterProfile, get_printer
+    pr = printer if isinstance(printer, PrinterProfile) else get_printer(printer)
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    built = build_case_parts(p)
+    parts, d = built["oriented"], built["design"]
+    files = [bambu_3mf.write_set_3mf(out / "Case_Set.3mf", parts, printer=pr)]   # fails fast on bed overflow
+    if d["inlay"] is not None:
+        files.append(bambu_3mf.write_backplate_multicolor_3mf(out / "Backplate_Multicolor.3mf", parts, printer=pr))
     for name, shape in parts.items():
         shape.label = name
         stl, step = out / f"{name}.stl", out / f"{name}.step"
@@ -779,30 +793,25 @@ def export_set(p: Preset, out_dir: str | Path) -> dict:
             raise RuntimeError(f"STEP export failed: {name}")
         files += [stl, step]
 
-    asm_children = [_label(frame, "Frame"), _label(plate, "Backplate"), _label(ring, "CameraRing")]
-    asm_children += [_label(b, f"Button_{n}") for n, b in btns]
+    asm_children = [_label(d["frame"], "Frame"), _label(d["plate"], "Backplate"), _label(d["ring"], "CameraRing")]
+    asm_children += [_label(b, f"Button_{n}") for n, b in d["buttons"]]
     asm = Compound(asm_children, label="Full_Assembly")
     asm_path = out / "Full_Assembly.step"
     if not export_step(asm, str(asm_path)):
         raise RuntimeError("assembly STEP failed")
     files.append(asm_path)
     files.append(laser_svg(p, out / "Laser_Backplate.svg"))
-    import bambu_3mf
-    files.append(bambu_3mf.write_set_3mf(out / "Case_Set.3mf", parts))
-    if inlay is not None:
-        files.append(bambu_3mf.write_backplate_multicolor_3mf(out / "Backplate_Multicolor.3mf", parts))
-    files.append(bambu_3mf.write_toolchanger_3mf(
-        out / "Toolchanger_InPlace.3mf",
-        {"frame": frame, "plate": plate, "inlay": inlay, "buttons": btns},
-        parts,
-    ))
+    pip = None
+    if pr.toolchanger:
+        import print_in_place
+        files.append(bambu_3mf.write_toolchanger_3mf(out / "Toolchanger_InPlace.3mf", d, parts, printer=pr))
+        pip = print_in_place.pip_report(p, d)
+        files.append(print_in_place.write_report(pip, out / "PrintInPlace_Report.txt"))
     unibody = print_ready_unibody(p)
     unibody_stl = out / "Unibody_OnePiece.stl"
     export_stl(unibody, str(unibody_stl), tolerance=0.01, angular_tolerance=0.1)
     files.append(unibody_stl)
-    return {"files": files, "timings": timings,
-            "design": {"frame": frame, "plate": plate, "ring": ring, "buttons": btns},
-            "oriented": parts}
+    return {"files": files, "timings": built["timings"], "design": d, "oriented": parts, "printer": pr, "pip": pip}
 
 
 def print_ready_unibody(p: Preset) -> Solid:
@@ -920,39 +929,120 @@ def coupon_region(p: Preset, margin: float = 4.0, min_span: float = 30.0):
     return {"x0": min(x_in, x_edge), "x1": max(x_in, x_edge), "y0": y_lo, "y1": y_edge, "sx": sx, "button": btn}
 
 
-def generate_test_coupon(p: Preset) -> dict:
-    """Corner cut-outs of frame/backplate + ring + one button: a ~10-15 min tolerance test print.
-    Returns design-pose pieces and print-oriented pieces."""
-    import copy
-    q = copy.deepcopy(p)
-    q.pattern.type = "solid"
+COUPON_TYPES = ("camera", "buttons", "ports")
+
+
+def _cut(shape, x0, x1, y0, y1, h):
+    """Keep the part of `shape` inside the XY rectangle (full height). Real generator geometry,
+    only trimmed -- dimensional relationships are untouched."""
+    box = Pos((x0 + x1) / 2, (y0 + y1) / 2, h / 2) * Box(x1 - x0, y1 - y0, h + 10)
+    return _solids_of(shape.intersect(box))
+
+
+def _coupon_camera(q: Preset) -> dict:
+    """Camera & snap-fit coupon (the original default): camera corner of frame + backplate,
+    the whole camera ring, and the same-side button nearest the camera."""
     reg = coupon_region(q)
-    w, l = reg["x1"] - reg["x0"], reg["y1"] - reg["y0"]
-    cutbox = Pos((reg["x0"] + reg["x1"]) / 2, (reg["y0"] + reg["y1"]) / 2, q.H / 2) * Box(w, l, q.H + 10)
-    frame = _solids_of(generate_frame(q).intersect(cutbox))
-    plate = _solids_of(generate_backplate(q, with_pattern=False).intersect(cutbox))
+    frame = _cut(generate_frame(q), reg["x0"], reg["x1"], reg["y0"], reg["y1"], q.H)
+    plate = _cut(generate_backplate(q, with_pattern=False), reg["x0"], reg["x1"], reg["y0"], reg["y1"], q.H)
     ring = generate_camera_ring(q)
-    btn = None
-    if reg["button"] is not None:
-        b = reg["button"]
-        btn_design = place_on_edge(_button_local(q, b)["button"], q, b.side, button_along(q, b), button_zc(q))
-        btn = (b.id, btn_design)
-    design = {"frame": frame, "plate": plate, "ring": ring, "button": btn}
     oriented = {
         "Frame_TPU_coupon": orient_for_print(frame, rot=(0, 0, 0)),
         "Backplate_PLA_coupon": orient_for_print(plate, rot=(0, 0, 0)),
         "CameraRing": orient_for_print(ring, rot=(0, 0, 0)),
     }
-    if btn is not None:
-        oriented[f"Button_{btn[0]}"] = button_print_shape(q, reg["button"])
-    return {"region": reg, "span": (w, l), "design": design, "oriented": oriented, "preset": q}
+    btn = None
+    if reg["button"] is not None:
+        b = reg["button"]
+        btn = (b.id, place_on_edge(_button_local(q, b)["button"], q, b.side, button_along(q, b), button_zc(q)))
+        oriented[f"Button_{b.id}"] = button_print_shape(q, b)
+    design = {"frame": frame, "plate": plate, "ring": ring, "button": btn}
+    return {"region": reg, "span": (reg["x1"] - reg["x0"], reg["y1"] - reg["y0"]),
+            "design": design, "oriented": oriented}
 
 
-def export_coupon(p: Preset, out_dir) -> dict:
+def _edge_strip(q: Preset, side: str, a0: float, a1: float, depth: float = 8.0):
+    """XY rectangle covering `side`'s bumper wall between along-edge coords a0..a1 (world X for
+    top/bottom, world Y for left/right), reaching `depth` mm inside the phone outline."""
+    ow, ol = q.W / 2 + q.outer_offset + 1, q.L / 2 + q.outer_offset + 1
+    if side == "right":
+        return q.W / 2 - depth, ow, a0, a1
+    if side == "left":
+        return -ow, -q.W / 2 + depth, a0, a1
+    if side == "top":
+        return a0, a1, q.L / 2 - depth, ol
+    return a0, a1, -ol, -q.L / 2 + depth
+
+
+def _coupon_buttons(q: Preset, margin: float = 4.0) -> dict:
+    """Button-fit coupon: for every side carrying buttons, the bumper wall strip with the real
+    windows + flange pockets, the matching backplate edge (snapped in, it holds the wall at its
+    real stiffness and position), plus every button on that side."""
+    if not q.buttons:
+        raise ParamError("This device preset has no buttons; choose the camera or ports coupon.")
+    frame = generate_frame(q)
+    plate = generate_backplate(q, with_pattern=False)
+    oriented, design, spans = {}, {"frames": {}, "plates": {}, "buttons": []}, []
+    s, c = q.style, q.clearances
+    for side in SIDE_ANGLE:
+        btns = [b for b in q.buttons if b.side == side]
+        if not btns:
+            continue
+        grow = s.button_flange_overhang + c.button_clearance + margin
+        lo = min(button_along(q, b) - b.length / 2 for b in btns) - grow
+        hi = max(button_along(q, b) + b.length / 2 for b in btns) + grow
+        x0, x1, y0, y1 = _edge_strip(q, side, lo, hi)
+        piece = _cut(frame, x0, x1, y0, y1, q.H)
+        design["frames"][side] = piece
+        oriented[f"Frame_TPU_buttons_{side}"] = orient_for_print(piece, rot=(0, 0, 0))
+        design["plates"][side] = _cut(plate, x0, x1, y0, y1, q.H)
+        oriented[f"Backplate_PLA_buttons_{side}"] = orient_for_print(design["plates"][side], rot=(0, 0, 0))
+        spans.append((x1 - x0, y1 - y0))
+        for b in btns:
+            design["buttons"].append((b.id, place_on_edge(_button_local(q, b)["button"], q, side,
+                                                          button_along(q, b), button_zc(q))))
+            oriented[f"Button_{b.id}"] = button_print_shape(q, b)
+    span = max(spans, key=lambda wl: wl[0] * wl[1])
+    return {"region": None, "span": span, "design": design, "oriented": oriented}
+
+
+def _coupon_ports(q: Preset, margin: float = 6.0) -> dict:
+    """Bottom-ports coupon: the bottom bumper wall with the real charging/speaker openings and
+    enough wall on either side to check their position against the phone."""
+    ports = [pt for pt in q.ports if pt.side == "bottom"]
+    if not ports:
+        raise ParamError("This device preset has no bottom ports; choose the camera or buttons coupon.")
+    half = q.W / 2 + q.outer_offset + 1
+    lo = max(-half, min(pt.center - pt.width / 2 for pt in ports) - margin)
+    hi = min(half, max(pt.center + pt.width / 2 for pt in ports) + margin)
+    x0, x1, y0, y1 = _edge_strip(q, "bottom", lo, hi, depth=10.0)
+    piece = _cut(generate_frame(q), x0, x1, y0, y1, q.H)
+    plate = _cut(generate_backplate(q, with_pattern=False), x0, x1, y0, y1, q.H)
+    return {"region": None, "span": (x1 - x0, y1 - y0), "design": {"frame": piece, "plate": plate},
+            "oriented": {"Frame_TPU_ports_bottom": orient_for_print(piece, rot=(0, 0, 0)),
+                         "Backplate_PLA_ports_bottom": orient_for_print(plate, rot=(0, 0, 0))}}
+
+
+def generate_test_coupon(p: Preset, coupon_type: str | None = None) -> dict:
+    """Short fit-test print cut from the REAL generator geometry (no simplified stand-ins).
+    coupon_type: camera (default; camera ring + snap joint corner) | buttons | ports.
+    Print time depends on your slicer settings: slice it to see the estimate."""
+    import copy
+    ctype = coupon_type or "camera"
+    if ctype not in COUPON_TYPES:
+        raise ParamError(f"coupon type must be one of {', '.join(COUPON_TYPES)}")
+    q = copy.deepcopy(p)
+    q.pattern.type = "solid"
+    c = {"camera": _coupon_camera, "buttons": _coupon_buttons, "ports": _coupon_ports}[ctype](q)
+    c.update(preset=q, coupon_type=ctype)
+    return c
+
+
+def export_coupon(p: Preset, out_dir, coupon_type: str | None = None, printer=None) -> dict:
     import bambu_3mf
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    c = generate_test_coupon(p)
+    c = generate_test_coupon(p, coupon_type)
     files = []
     for name, shape in c["oriented"].items():
         shape.label = name
@@ -961,6 +1051,6 @@ def export_coupon(p: Preset, out_dir) -> dict:
         files += [out / f"{name}.stl", out / f"{name}.step"]
     objs = [bambu_3mf.Obj(n, [bambu_3mf.part_from_shape(n, s, 1 if n.startswith("Frame") else 2)])
             for n, s in c["oriented"].items()]
-    files.append(bambu_3mf.write_3mf(out / "Coupon_Set.3mf", objs))
+    files.append(bambu_3mf.write_3mf(out / "Coupon_Set.3mf", objs, printer))
     c["files"] = files
     return c

@@ -1,5 +1,8 @@
-"""Phase 2 verification gate: build a full 4-part set and validate outputs.
-Usage: python cli_test.py [--preset iphone_15_pro] [--pattern solid|hex|svg|text] [--mode through|deboss|inlay] [--out out] [--coupon]
+"""Headless verification gate: build a full set (or a fit-test coupon) and validate the outputs.
+Usage: python cli_test.py [--preset iphone_15_pro] [--pattern solid|hex|voronoi|grid|waves|svg|text]
+                          [--mode through|deboss|inlay] [--magsafe] [--printer generic_256|bambu_h3c]
+                          [--coupon [--coupon-type camera|buttons|ports]] [--out out]
+Exit codes: 0 all checks passed, 1 a check failed, 2 the design itself is invalid (same message as HTTP 422).
 """
 import argparse
 import dataclasses
@@ -33,7 +36,19 @@ def inter_volume(a, b):
         return r.volume
     return sum(x.volume for x in r)
 
-def run(preset_id, pattern, mode, out, magsafe=False):
+def check_3mf(path, printer, res):
+    import verify_3mf
+    rep = verify_3mf.validate_3mf(path, bed=(printer.bed_x, printer.bed_y), max_slots=printer.filament_slots)
+    check(not rep["errors"], f"{Path(path).name}: independent 3MF validation "
+          + ("passed" if not rep["errors"] else "; ".join(rep["errors"][:3])), res)
+    l3 = verify_3mf.lib3mf_check(path)
+    if l3 is not None:
+        check(l3["ok"], f"{Path(path).name}: lib3mf {l3['version']} strict read "
+              + ("OK" if l3["ok"] else str(l3["error"] or l3["warnings"])), res)
+    return rep
+
+
+def run(preset_id, pattern, mode, out, magsafe=False, printer=None):
     p = Preset.load(preset_id)
     p.pattern.type, p.pattern.mode = pattern, mode
     p.style.magsafe_ring = magsafe
@@ -43,17 +58,19 @@ def run(preset_id, pattern, mode, out, magsafe=False):
         p.pattern.params = {"text": "CASECRAFT", "size": 0.65, "font": "Arial", "bold": True}
     res = []
     t0 = time.perf_counter()
-    r = ce.export_set(p, out)
+    from printers import get_printer
+    pr = get_printer(printer)
+    r = ce.export_set(p, out, printer=pr)
     total = time.perf_counter() - t0
     print(f"\nTimings (s): {r['timings']}  total={total:.2f}")
     if pattern in ("voronoi", "grid", "waves", "hex"):
         check(r["timings"]["backplate"] < 1.5, f"{pattern} backplate generated in {r['timings']['backplate']:.3f}s (< 1.5s)", res)
     if pattern == "text" and mode == "through" and p.pattern.stencil_bridges:
         check(len(r["design"]["plate"].solids()) == 1, "stencil_bridges: text through-cut keeps backplate as 1 connected solid", res)
-    uni_mesh = trimesh.load(Path(out) / "Unibody_OnePiece.stl")
-    check(uni_mesh.is_watertight, f"Unibody_OnePiece.stl watertight ({len(uni_mesh.faces)} tris)", res)
-    n_bodies = len(uni_mesh.split(only_watertight=False))
-    check(n_bodies == 1, f"Unibody_OnePiece.stl is one connected body ({n_bodies} found)", res)
+    import verify
+    uni = verify.mesh_report(trimesh.load(Path(out) / "Unibody_OnePiece.stl"))
+    check(uni["watertight"] and uni["is_volume"], f"Unibody_OnePiece.stl watertight, consistently wound ({uni['triangles']} tris)", res)
+    check(uni["bodies"] == 1, f"Unibody_OnePiece.stl is one connected body ({uni['bodies']} found)", res)
     # files
     for f in r["files"]:
         check(Path(f).exists() and Path(f).stat().st_size > 100, f"file written: {Path(f).name} ({Path(f).stat().st_size} B)", res)
@@ -97,8 +114,19 @@ def run(preset_id, pattern, mode, out, magsafe=False):
     # laser svg
     svg = (Path(out) / "Laser_Backplate.svg").read_text()
     check("<path" in svg and "mm" in svg, "laser SVG has path + mm units", res)
-    # 3MF structure + slot assignment
+    # 3MF: independent structural validation (+ lib3mf strict when installed), then slot assignment
     import bambu_3mf
+    import verify_3mf
+    for f in ("Case_Set.3mf", "Backplate_Multicolor.3mf"):
+        if (Path(out) / f).exists():
+            check_3mf(Path(out) / f, pr, res)
+    if pr.toolchanger:
+        tc = check_3mf(Path(out) / "Toolchanger_InPlace.3mf", pr, res)
+        ext = verify_3mf.part_extruders(tc)
+        check(ext.get("Frame_TPU") == 1 and ext.get("Backplate_Base") == 2
+              and all(ext.get(f"Button_{b.id}") == 2 for b in p.buttons),
+              f"Toolchanger_InPlace.3mf material assignment {ext}", res)
+        print(f"      print-in-place (experimental): {r['pip']['summary']}")
     sm = bambu_3mf.summarize_3mf(Path(out) / "Case_Set.3mf")
     check(all(pid in sm["meshes"] and sm["meshes"][pid] > 0 for ids in sm["wraps"].values() for pid in ids),
           f"Case_Set.3mf: every component references a non-empty mesh ({len(sm['meshes'])} meshes, {len(sm['wraps'])} objects)", res)
@@ -120,17 +148,22 @@ def run(preset_id, pattern, mode, out, magsafe=False):
     return res, r["timings"]
 
 
-def run_coupon(preset_id, out):
+def run_coupon(preset_id, out, coupon_type=None, printer=None):
+    from printers import get_printer
     p = Preset.load(preset_id)
+    pr = get_printer(printer)
     res = []
     t0 = time.perf_counter()
-    c = ce.export_coupon(p, out)
+    c = ce.export_coupon(p, out, coupon_type=coupon_type, printer=pr)
     total = time.perf_counter() - t0
-    print(f"\nCoupon build total={total:.2f}s span=({c['span'][0]:.1f}, {c['span'][1]:.1f})")
+    print(f"\n{c['coupon_type']} coupon build total={total:.2f}s span=({c['span'][0]:.1f}, {c['span'][1]:.1f})")
     for f in c["files"]:
         check(Path(f).exists() and Path(f).stat().st_size > 100, f"coupon file written: {Path(f).name} ({Path(f).stat().st_size} B)", res)
     w, l = c["span"]
-    check(25 <= w < p.W and 25 <= l < p.L, f"coupon span ({w:.1f}x{l:.1f}) within [25, {p.W}x{p.L})", res)
+    if c["coupon_type"] == "camera":
+        check(25 <= w < p.W and 25 <= l < p.L, f"coupon span ({w:.1f}x{l:.1f}) within [25, {p.W}x{p.L})", res)
+    else:
+        check(min(w, l) < 15 and max(w, l) < max(p.W, p.L), f"edge-strip coupon span ({w:.1f}x{l:.1f})", res)
     for name, shp in c["oriented"].items():
         solids = shp.solids()
         check(all(s.is_valid for s in solids) and shp.volume > 1, f"{name}: valid B-rep, {len(solids)} solid(s), vol={shp.volume:.0f} mm3", res)
@@ -138,6 +171,7 @@ def run_coupon(preset_id, out):
         m = trimesh.load(Path(out) / f"{name}.stl")
         check(m.is_watertight, f"{name}: STL watertight ({len(m.faces)} tris)", res)
     import bambu_3mf
+    check_3mf(Path(out) / "Coupon_Set.3mf", pr, res)
     sm = bambu_3mf.summarize_3mf(Path(out) / "Coupon_Set.3mf")
     check(all(pid in sm["meshes"] and sm["meshes"][pid] > 0 for ids in sm["wraps"].values() for pid in ids),
           f"Coupon_Set.3mf: every component references a non-empty mesh ({len(sm['meshes'])} meshes, {len(sm['wraps'])} objects)", res)
@@ -174,13 +208,16 @@ if __name__ == "__main__":
     ap.add_argument("--out", default="out")
     ap.add_argument("--coupon", action="store_true")
     ap.add_argument("--magsafe", action="store_true")
+    ap.add_argument("--printer", default=None, help="printer profile id (default generic_256)")
+    ap.add_argument("--coupon-type", default=None, choices=["camera", "buttons", "ports"],
+                    help="fit-test coupon to build with --coupon (default camera)")
     a = ap.parse_args()
     from params import ParamError
     try:
         if a.coupon:
-            results = run_coupon(a.preset, a.out)
+            results = run_coupon(a.preset, a.out, a.coupon_type, a.printer)
         else:
-            results, timings = run(a.preset, a.pattern, a.mode, a.out, magsafe=a.magsafe)
+            results, timings = run(a.preset, a.pattern, a.mode, a.out, magsafe=a.magsafe, printer=a.printer)
             results += stress()
     except ParamError as exc:            # same message the API returns as HTTP 422
         print(f"INVALID DESIGN: {exc}")

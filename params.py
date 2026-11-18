@@ -145,6 +145,22 @@ class Pattern:
     params: dict[str, Any] = field(default_factory=dict)  # hex/voronoi: pitch | grid: pitch, angle | waves: pitch, amplitude, wavelength | svg: svg, size, offset | text: text, font, font_size, size, offset
 
 
+VERIFICATION_LEVELS = ("approximate", "dimensionally_verified", "physically_fit_tested")
+FIT_TEST_STATUSES = ("untested", "passed", "failed")
+
+
+@dataclass
+class Verification:
+    """Optional provenance of a device preset. Defaults describe an unverified preset, so old
+    preset files (without this block) load as `approximate`. Never fill these in without
+    evidence: `physically_fit_tested` means a printed case was fitted to the real device."""
+    level: str = "approximate"         # approximate | dimensionally_verified | physically_fit_tested
+    source: str = ""                   # where the dimensions came from (spec sheet, calipers, CAD, ...)
+    fit_test: str = "untested"         # untested | passed | failed  (physical fit test of a printed part)
+    notes: str = ""
+    unverified_features: list[str] = field(default_factory=list)   # e.g. ["camera", "buttons"]
+
+
 @dataclass
 class Preset:
     id: str = "custom"
@@ -156,6 +172,7 @@ class Preset:
     clearances: Clearances = field(default_factory=Clearances)
     style: Style = field(default_factory=Style)
     pattern: Pattern = field(default_factory=Pattern)
+    verification: Verification = field(default_factory=Verification)
 
     # ---- construction -------------------------------------------------
     @classmethod
@@ -171,6 +188,7 @@ class Preset:
             clearances=_build(Clearances, d.pop("clearances", None)),
             style=_build(Style, d.pop("style", None)),
             pattern=_build(Pattern, d.pop("pattern", None)),
+            verification=_build(Verification, d.pop("verification", None)),
         )
         d.pop("$schema", None)
         if d:
@@ -387,6 +405,16 @@ class Preset:
                   ("style", self.style), ("pattern", self.pattern)]
         groups += [(f"buttons[{i}]", bt) for i, bt in enumerate(self.buttons)]
         groups += [(f"ports[{i}]", pt) for i, pt in enumerate(self.ports)]
+        groups += [("verification", self.verification)]
+        v = self.verification
+        if v.level not in VERIFICATION_LEVELS:
+            errs.append("verification.level must be " + "|".join(VERIFICATION_LEVELS))
+        if v.fit_test not in FIT_TEST_STATUSES:
+            errs.append("verification.fit_test must be " + "|".join(FIT_TEST_STATUSES))
+        if v.level == "physically_fit_tested" and v.fit_test != "passed":
+            errs.append("verification.level 'physically_fit_tested' requires fit_test 'passed'")
+        if not (isinstance(v.unverified_features, list) and all(isinstance(x, str) for x in v.unverified_features)):
+            errs.append("verification.unverified_features must be a list of strings")
         for gname, obj in groups:
             for f in fields(obj):
                 v = getattr(obj, f.name)

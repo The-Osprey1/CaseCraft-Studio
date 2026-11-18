@@ -26,7 +26,9 @@ if str(BASE_DIR) not in sys.path:
 import bambu_3mf
 import cad_engine as ce
 import dfm
+import print_in_place
 from params import ParamError, Preset
+from printers import DEFAULT_PRINTER, PRINTERS, PrinterProfile, get_printer
 
 PRESETS_DIR = BASE_DIR / "presets"
 SCHEMA_PATH = BASE_DIR / "schema" / "phone_preset.schema.json"
@@ -34,7 +36,7 @@ WEB_DIST_DIR = BASE_DIR / "web" / "dist"
 
 _CACHE_MAX = 16
 _preview_cache: OrderedDict[str, dict] = OrderedDict()
-_zip_cache: OrderedDict[tuple[str, bool], tuple[bytes, str]] = OrderedDict()
+_zip_cache: OrderedDict[tuple, tuple[bytes, str]] = OrderedDict()
 _cache_lock = threading.Lock()
 _cad_lock = threading.Lock()
 
@@ -58,6 +60,56 @@ def _preset_from_payload(payload: dict) -> Preset:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+def _printer(printer_id: str | None) -> PrinterProfile:
+    try:
+        return get_printer(printer_id)
+    except ParamError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _finding(level: str, source: str, message: str) -> dict:
+    """level: error (export blocked) | warning (review recommended) | info (verification /
+    adaptation notes). Concrete messages only -- no aggregate score."""
+    return {"level": level, "source": source, "message": message}
+
+
+def design_findings(p: Preset, pr: PrinterProfile) -> list[dict]:
+    """Findings that do not need 3D geometry (parameters, pattern connectivity, print mode,
+    device verification). Bed-fit findings are added by the preview after layout."""
+    out = [_finding("warning", "parameters", w) for w in p.warnings()]
+    if p.pattern.type != "solid" and p.pattern.mode == "through":
+        conn = ce.through_cut_connectivity(p)
+        if conn["thin_necks"]:
+            out.append(_finding("warning", "pattern",
+                                f"Through-cut leaves {conn['thin_necks']} region(s) joined only by ligaments "
+                                "thinner than one extrusion width (0.4 mm); increase the web width or margin."))
+    if pr.toolchanger:
+        out += [_finding("warning" if i else "info", "print_in_place", m)
+                for i, m in enumerate(print_in_place.quick_findings(p))]
+    v = p.verification
+    if v.level != "physically_fit_tested":
+        label = {"approximate": "approximate (not measured)", "dimensionally_verified": "dimensionally verified"}[v.level]
+        out.append(_finding("info", "verification",
+                            f"{p.name}: dimensions are {label}; the fit has not been physically tested. "
+                            "Print a fit-test coupon first."))
+    return out
+
+
+def _bed_layout(oriented_map: dict, pr: PrinterProfile):
+    """Lay out the Case_Set objects exactly as the exported Case_Set.3mf does. If they do not
+    fit, they are still laid out (on an unbounded plate) so the preview SHOWS the overflow, and
+    an error finding blocks export."""
+    objs = bambu_3mf.build_set_objects(oriented_map)
+    try:
+        bambu_3mf.layout_for_printer(objs, pr)
+        return objs, None
+    except bambu_3mf.BedOverflow as exc:
+        for o in objs:
+            o.position = None
+        bambu_3mf.auto_layout(objs, bed=(10_000.0, pr.bed_y), margin=pr.margin)
+        return objs, str(exc)
+
+
 def _shape_to_stl_bytes(shape, tol: float = 0.02, ang: float = 0.15) -> bytes:
     mesh = dfm.to_mesh(shape, tol=tol, ang=ang)
     data = mesh.export(file_type="stl")
@@ -78,53 +130,22 @@ def _bbox_dict(shape) -> dict:
     }
 
 
-def _build_preview(p: Preset) -> dict:
-    timings: dict[str, float] = {}
+def _build_preview(p: Preset, pr: PrinterProfile) -> dict:
+    built = ce.build_case_parts(p)
+    timings, d, oriented_map = built["timings"], built["design"], built["oriented"]
+    frame, plate, inlay, ring, btns = d["frame"], d["plate"], d["inlay"], d["ring"], d["buttons"]
+    oriented_frame = oriented_map["Frame_TPU"]
+    oriented_plate = oriented_map["Backplate_PLA"]
+    oriented_ring = oriented_map["CameraRing"]
+    oriented_inlay = oriented_map.get("Backplate_Inlay")
+    laid_btns = ce.layout_row([ce.button_print_shape(p, b) for b in p.buttons]) if p.buttons else []  # == Buttons part
 
-    def timed(key: str, fn):
-        t0 = time.perf_counter()
-        val = fn()
-        timings[key] = round(time.perf_counter() - t0, 3)
-        return val
-
-    frame = timed("frame", lambda: ce.generate_frame(p))
-    plate, inlay = timed("backplate", lambda: ce.generate_backplate(p))
-    ring = timed("camera_ring", lambda: ce.generate_camera_ring(p))
-    btns = timed("buttons", lambda: ce.generate_buttons(p))
-
-    oriented_frame = ce.orient_for_print(frame, rot=(0, 0, 0))
-    oriented_plate = ce.orient_for_print(plate, rot=(0, 0, 0))
-    oriented_ring = ce.orient_for_print(ring, rot=(0, 0, 0))
-    oriented_inlay = ce.orient_for_print(inlay, rot=(0, 0, 0), ref=plate) if inlay is not None else None
-    oriented_btns = [ce.button_print_shape(p, b) for b in p.buttons]
-    laid_btns = ce.layout_row(oriented_btns) if oriented_btns else []
-
-    oriented_map = {
-        "Frame_TPU": oriented_frame,
-        "Backplate_PLA": oriented_plate,
-        "CameraRing": oriented_ring,
-    }
-    if laid_btns:
-        oriented_map["Buttons"] = Compound(laid_btns, label="Buttons")
-    if oriented_inlay is not None:
-        oriented_map["Backplate_Inlay"] = oriented_inlay
-
-    objs = bambu_3mf.build_set_objects(oriented_map)
-    try:
-        bambu_3mf.auto_layout(objs, bed=(256.0, 256.0))
-        bed_half = 128.0
-    except ValueError:
-        for o in objs:
-            o.position = None
-        bambu_3mf.auto_layout(objs, bed=(600.0, 600.0))
-        bed_half = 300.0
-
+    objs, overflow = _bed_layout(oriented_map, pr)
+    # 3MF plate coordinates have the origin at the plate corner; the viewport centres the plate.
     bed_offsets: dict[str, tuple[float, float]] = {}
     for o in objs:
         lo, _ = o.bbox()
-        tx = o.position[0] - lo[0] - bed_half
-        ty = o.position[1] - lo[1] - bed_half
-        bed_offsets[o.name] = (tx, ty)
+        bed_offsets[o.name] = (o.position[0] - lo[0] - pr.bed_x / 2, o.position[1] - lo[1] - pr.bed_y / 2)
 
     def place_bed(shape, obj_name: str):
         tx, ty = bed_offsets[obj_name]
@@ -192,11 +213,20 @@ def _build_preview(p: Preset) -> dict:
     phone_ghost = ce.offset_prism(p, 0.0, p.bp_t, p.bp_t + p.T)
     phone_ghost_b64 = _shape_to_stl_b64(phone_ghost, tol=0.05, ang=0.3)
 
+    findings = design_findings(p, pr)
+    if overflow:
+        findings.insert(0, _finding("error", "printer", overflow))
     return {
         "preset_id": p.id,
         "timings": timings,
         "parts": parts_list,
         "laser_svg": svg_text,
+        "printer": pr.to_dict(),
+        "bed": {"x": pr.bed_x, "y": pr.bed_y, "margin": pr.margin, "fits": overflow is None,
+                "layout": "Case_Set.3mf"},
+        "findings": findings,
+        "unibody_notes": ce.unibody_adaptations(p),
+        "export_blocked": any(f["level"] == "error" for f in findings),
         "summary": {
             "outer_width": round(p.W + 2 * p.outer_offset, 2),
             "outer_length": round(p.L + 2 * p.outer_offset, 2),
@@ -208,14 +238,44 @@ def _build_preview(p: Preset) -> dict:
     }
 
 
-def _build_export_zip(p: Preset, coupon: bool) -> tuple[bytes, str]:
+def _readme(p: Preset, pr: PrinterProfile, res: dict, coupon_type: str | None) -> str:
+    v = p.verification
+    lines = [
+        f"CaseCraft Studio export -- {p.name}",
+        f"Printer profile: {pr.name} ({pr.bed_x:g} x {pr.bed_y:g} mm plate)",
+        "",
+        "Verification status (see docs/MANUFACTURING_VERIFICATION.md in the CaseCraft repository):",
+        "  * Geometrically valid: every solid was produced and checked by the OpenCascade kernel.",
+        "  * Mesh valid: STL/3MF meshes are checked watertight; 3MF structure is checked independently.",
+        "  * Slicer verified: NOT performed by CaseCraft. Open the 3MF in your slicer and check the",
+        "    filament slot of every part before printing.",
+        f"  * Physically verified: device preset is '{v.level}'"
+        + (f" (source: {v.source})" if v.source else "") + "; fit test: " + v.fit_test + ".",
+        "",
+    ]
+    if coupon_type:
+        lines += [f"Fit-test coupon: {coupon_type}. Print it before committing to a full case.", ""]
+    else:
+        lines += ["Unibody_OnePiece.stl adaptations:"] + [f"  - {n}" for n in ce.unibody_adaptations(p)] + [""]
+        if res.get("pip"):
+            lines += [f"Print-in-place (EXPERIMENTAL): {res['pip']['summary']}. Details: PrintInPlace_Report.txt", ""]
+        elif not pr.toolchanger:
+            lines += ["Toolchanger_InPlace.3mf is not included: select a toolchanger printer profile.", ""]
+    warns = p.warnings()
+    if warns:
+        lines += ["Warnings:"] + [f"  - {w}" for w in warns] + [""]
+    return "\n".join(lines)
+
+
+def _build_export_zip(p: Preset, coupon: bool, pr: PrinterProfile, coupon_type: str | None = None) -> tuple[bytes, str]:
     with tempfile.TemporaryDirectory() as tmpdir:
         out_dir = Path(tmpdir)
         if coupon:
-            res = ce.export_coupon(p, out_dir)
-            filename = f"{p.id}_coupon_bundle.zip"
+            res = ce.export_coupon(p, out_dir, coupon_type=coupon_type, printer=pr)
+            coupon_type = res["coupon_type"]
+            filename = f"{p.id}_coupon_{coupon_type}_bundle.zip"
         else:
-            res = ce.export_set(p, out_dir)
+            res = ce.export_set(p, out_dir, printer=pr)
             filename = f"{p.id}_casecraft_bundle.zip"
 
         buf = io.BytesIO()
@@ -225,6 +285,7 @@ def _build_export_zip(p: Preset, coupon: bool) -> tuple[bytes, str]:
                 if fp.exists():
                     zf.write(fp, arcname=fp.name)
             zf.writestr("preset.json", json.dumps(dataclasses.asdict(p), indent=2))
+            zf.writestr("README.txt", _readme(p, pr, res, coupon_type if coupon else None))
         return buf.getvalue(), filename
 
 
@@ -234,6 +295,11 @@ router = APIRouter()
 @router.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@router.get("/printers")
+def get_printers():
+    return {"printers": [pr.to_dict() for pr in PRINTERS.values()], "default_id": DEFAULT_PRINTER}
 
 
 @router.get("/presets")
@@ -250,9 +316,10 @@ def get_presets():
 
 
 @router.post("/generate-preview")
-def generate_preview(payload: dict):
+def generate_preview(payload: dict, printer: str = Query(default=DEFAULT_PRINTER)):
     p = _preset_from_payload(payload)
-    key = _preset_hash(p)
+    pr = _printer(printer)
+    key = (_preset_hash(p), pr.id)
     with _cache_lock:
         if key in _preview_cache:
             _preview_cache.move_to_end(key)
@@ -260,7 +327,7 @@ def generate_preview(payload: dict):
 
     try:
         with _cad_lock:
-            result = _build_preview(p)
+            result = _build_preview(p, pr)
     except ParamError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
@@ -275,9 +342,11 @@ def generate_preview(payload: dict):
 
 
 @router.post("/export-zip")
-def export_zip(payload: dict, coupon: bool = Query(default=False)):
+def export_zip(payload: dict, coupon: bool = Query(default=False),
+               printer: str = Query(default=DEFAULT_PRINTER), coupon_type: str | None = Query(default=None)):
     p = _preset_from_payload(payload)
-    key = (_preset_hash(p), coupon)
+    pr = _printer(printer)
+    key = (_preset_hash(p), coupon, pr.id, coupon_type)
     with _cache_lock:
         if key in _zip_cache:
             _zip_cache.move_to_end(key)
@@ -290,7 +359,7 @@ def export_zip(payload: dict, coupon: bool = Query(default=False)):
 
     try:
         with _cad_lock:
-            data, filename = _build_export_zip(p, coupon)
+            data, filename = _build_export_zip(p, coupon, pr, coupon_type)
     except ParamError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
@@ -322,36 +391,44 @@ _PART_SPECS = {
 }
 
 
-def _build_single_part(p: Preset, part: str) -> tuple[bytes, str, str]:
+def _build_single_part(p: Preset, part: str, pr: PrinterProfile) -> tuple[bytes, str, str]:
     if part not in _PART_SPECS:
         raise HTTPException(status_code=400, detail=f"Unknown part '{part}'. Valid: {sorted(_PART_SPECS)}")
     filename, media_type = _PART_SPECS[part]
+    dl_name = f"{p.id}_{filename}"
+    if part == "toolchanger_3mf" and not pr.toolchanger:
+        raise ParamError(f"Print-in-place needs a toolchanger printer profile; {pr.name} has a single nozzle")
     with tempfile.TemporaryDirectory() as tmpdir:
-        out_dir = Path(tmpdir)
+        target = Path(tmpdir) / filename
         if part == "laser_svg":
-            svg_path = out_dir / filename
-            ce.laser_svg(p, svg_path)
-            return svg_path.read_bytes(), f"{p.id}_{filename}", media_type
+            ce.laser_svg(p, target)
+            return target.read_bytes(), dl_name, media_type
         if part == "unibody_stl":
-            uni = ce.print_ready_unibody(p)
-            return _shape_to_stl_bytes(uni, tol=0.01, ang=0.1), f"{p.id}_{filename}", media_type
-
-        res = ce.export_set(p, out_dir)
-        target = out_dir / filename
-        if part == "backplate_3mf" and not target.exists():
-            # Single-part 3MF fallback when pattern mode is not 'inlay'
-            bambu_3mf.write_backplate_multicolor_3mf(target, res["oriented"])
-        if not target.exists():
-            raise HTTPException(status_code=404, detail=f"Part {filename} not generated for current preset")
-        return target.read_bytes(), f"{p.id}_{filename}", media_type
+            return _shape_to_stl_bytes(ce.print_ready_unibody(p), tol=0.01, ang=0.1), dl_name, media_type
+        built = ce.build_case_parts(p)
+        oriented = built["oriented"]
+        if part == "case_set_3mf":
+            bambu_3mf.write_set_3mf(target, oriented, printer=pr)
+        elif part == "backplate_3mf":     # single-part 3MF when the pattern is not an inlay
+            bambu_3mf.write_backplate_multicolor_3mf(target, oriented, printer=pr)
+        elif part == "toolchanger_3mf":
+            bambu_3mf.write_toolchanger_3mf(target, built["design"], oriented, printer=pr)
+        else:
+            key = {"frame_stl": "Frame_TPU", "backplate_stl": "Backplate_PLA", "ring_stl": "CameraRing",
+                   "buttons_stl": "Buttons"}[part]
+            if key not in oriented:
+                raise HTTPException(status_code=404, detail=f"Part {filename} not generated for current preset")
+            return _shape_to_stl_bytes(oriented[key], tol=0.01, ang=0.1), dl_name, media_type
+        return target.read_bytes(), dl_name, media_type
 
 
 @router.post("/export-part")
-def export_part(payload: dict, part: str = Query(...)):
+def export_part(payload: dict, part: str = Query(...), printer: str = Query(default=DEFAULT_PRINTER)):
     p = _preset_from_payload(payload)
+    pr = _printer(printer)
     try:
         with _cad_lock:
-            data, dl_name, media_type = _build_single_part(p, part)
+            data, dl_name, media_type = _build_single_part(p, part, pr)
     except HTTPException:
         raise
     except ParamError as exc:

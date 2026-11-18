@@ -20,7 +20,7 @@ from shapely import affinity, voronoi_polygons
 from shapely.geometry import LineString, MultiPoint, MultiPolygon, Point, Polygon, box as sbox
 from shapely.ops import unary_union
 
-from params import Preset
+from params import MIN_FLOOR, PATTERN_DEFAULT_PITCH, ParamError, Preset
 from safe_ops import safe_chamfer, safe_corner_radius, safe_fillet
 
 log = logging.getLogger("casecraft")
@@ -206,13 +206,28 @@ def camera_cutout_poly(p: Preset) -> Polygon:
     return rrect_poly(w, h, r, cx, cy)
 
 
-def magsafe_pocket_poly(p: Preset):
-    """Internal MagSafe magnet ring pocket (54.4 mm OD, 45.6 mm ID + bottom alignment tail)."""
+def magsafe_ring_poly(p: Preset) -> Polygon:
+    """Full MagSafe magnet ring footprint (54.4 mm OD, 45.6 mm ID + bottom alignment tail)."""
     ring = Point(0.0, 0.0).buffer(27.2, quad_segs=48).difference(Point(0.0, 0.0).buffer(22.8, quad_segs=48))
     tail = sbox(-2.4, -38.5, 2.4, -29.0)
-    pocket = ring.union(tail)
-    pocket = pocket.intersection(plate_outline_poly(p, p.plate_body_offset).buffer(-2.0))
-    pocket = pocket.difference(camera_cutout_poly(p).buffer(1.5))
+    return affinity.translate(ring.union(tail), 0.0, p.style.magsafe_offset_y)
+
+
+def magsafe_pocket_poly(p: Preset):
+    """Internal magnet ring pocket. A real magnet ring cannot be trimmed, so if the ring would
+    collide with the camera cutout or run within 2 mm of the plate edge this raises instead of
+    silently clipping the pocket."""
+    full = magsafe_ring_poly(p)
+    edge_keep = plate_outline_poly(p, p.plate_body_offset).buffer(-2.0)
+    cam_keepout = camera_cutout_poly(p).buffer(1.5)
+    pocket = full.intersection(edge_keep).difference(cam_keepout)
+    lost = full.area - pocket.area
+    if lost > 0.005 * full.area:
+        where = "camera cutout" if full.intersects(cam_keepout) else "backplate edge"
+        raise ParamError(
+            f"MagSafe ring overlaps the {where} ({100 * lost / full.area:.0f}% of the ring would be cut away). "
+            f"Shift it with style.magsafe_offset_y (currently {p.style.magsafe_offset_y:g} mm; "
+            f"negative moves it towards the bottom) to match your phone's charging coil.")
     return pocket
 
 
@@ -437,16 +452,22 @@ def pattern_polys(p: Preset) -> list[Polygon]:
         return []
     region = plate_outline_poly(p, p.plate_body_offset).buffer(-pat.margin)
     region = region.difference(camera_cutout_poly(p).buffer(pat.margin))
+    if (p.style.magsafe_ring and pat.mode in ("deboss", "inlay")
+            and p.bp_t - pat.depth - p.style.magsafe_depth < MIN_FLOOR):
+        # Outer-face recess + inner-face magnet pocket would meet in a too-thin (or holed) skin:
+        # keep the pattern off the pocket footprint, plus one web of wall around it.
+        # (coarse outline: the 48-segment ring arcs otherwise bloat every clipped cell's B-rep)
+        keepout = magsafe_pocket_poly(p).buffer(pat.web, quad_segs=6).simplify(0.05)
+        region = region.difference(keepout)
+    pitch = float(pat.params.get("pitch", PATTERN_DEFAULT_PITCH.get(pat.type, 0.0)))
     if pat.type == "hex":
-        return _hex_polys(region, float(pat.params.get("pitch", 9.0)), pat.web)
+        return _hex_polys(region, pitch, pat.web)
     if pat.type == "voronoi":
-        return _voronoi_polys(region, float(pat.params.get("pitch", 11.0)), pat.web,
-                              int(pat.params.get("seed", 42)))
+        return _voronoi_polys(region, pitch, pat.web, int(pat.params.get("seed", 42)))
     if pat.type == "grid":
-        return _grid_polys(region, float(pat.params.get("pitch", 8.5)), pat.web,
-                           float(pat.params.get("angle", 45.0)))
+        return _grid_polys(region, pitch, pat.web, float(pat.params.get("angle", 45.0)))
     if pat.type == "waves":
-        return _wave_polys(region, float(pat.params.get("pitch", 7.0)), pat.web,
+        return _wave_polys(region, pitch, pat.web,
                            float(pat.params.get("amplitude", 3.5)),
                            float(pat.params.get("wavelength", 28.0)))
     if pat.type == "svg":
@@ -705,8 +726,9 @@ def generate_unibody(p: Preset) -> Solid:
     """Single-piece fused unibody print (for 1-extruder TPU or flexible cases) sitting flat on Z=0."""
     import copy
     q = copy.deepcopy(p)
-    # Zero snap clearances + small button tie overlap so all parts fuse into a connected solid
-    q.clearances.backplate_snap_clearance = 0.05
+    # Small NEGATIVE clearances so the plate/tongue and buttons overlap the frame by 0.05 mm and
+    # the fuse yields ONE connected solid (a positive gap leaves the plate as a loose second body).
+    q.clearances.backplate_snap_clearance = -0.05
     q.clearances.button_clearance = -0.05
     frame = generate_frame(q)
     plate, _ = generate_backplate(q)
@@ -723,6 +745,17 @@ def generate_unibody(p: Preset) -> Solid:
     fused = frame.fuse(plate, cam_rim, *btns).clean()
     if not _is_valid(fused):
         raise RuntimeError("unibody solid invalid")
+    n = len(fused.solids())
+    if n != 1:
+        raise RuntimeError(f"unibody is not one piece: fused into {n} separate solids")
+    fused = fused.solids()[0]
+    if len(fused.shells()) > 1:
+        # Sealed air pockets (e.g. where a fused button flange's chamfer meets its pocket) become
+        # extra closed shells in the STL; rebuild from the outer skin so the print is truly solid.
+        outer = max(fused.shells(), key=lambda s: s.bounding_box().diagonal)
+        fused = Solid(outer)
+        if not _is_valid(fused):
+            raise RuntimeError("unibody solid invalid after removing internal voids")
     return fused
 
 

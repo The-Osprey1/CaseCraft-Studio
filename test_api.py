@@ -82,9 +82,12 @@ def test_generate_preview(presets: dict):
     print("PASS  Cache hit + 422 validation error handling")
 
 
-    # 4) Voronoi + MagSafe Ring Pocket
+    # 4) Voronoi + MagSafe Ring Pocket (OnePlus 13 camera overlaps a centred ring: must be shifted)
     payload_vor = copy.deepcopy(presets["oneplus_13"])
     payload_vor["style"]["magsafe_ring"] = True
+    r_clip = client.post("/api/generate-preview", json=payload_vor)
+    assert r_clip.status_code == 422 and "magsafe_offset_y" in r_clip.json()["detail"], r_clip.text
+    payload_vor["style"]["magsafe_offset_y"] = -12.0
     payload_vor["pattern"] = {"type": "voronoi", "mode": "through", "depth": 0.8, "margin": 3.0, "web": 1.6, "params": {"pitch": 11.0, "seed": 42}}
     r_vor = client.post("/api/generate-preview", json=payload_vor)
     assert r_vor.status_code == 200, r_vor.text

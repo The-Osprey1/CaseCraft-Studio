@@ -52,6 +52,8 @@ def run(preset_id, pattern, mode, out, magsafe=False):
         check(len(r["design"]["plate"].solids()) == 1, "stencil_bridges: text through-cut keeps backplate as 1 connected solid", res)
     uni_mesh = trimesh.load(Path(out) / "Unibody_OnePiece.stl")
     check(uni_mesh.is_watertight, f"Unibody_OnePiece.stl watertight ({len(uni_mesh.faces)} tris)", res)
+    n_bodies = len(uni_mesh.split(only_watertight=False))
+    check(n_bodies == 1, f"Unibody_OnePiece.stl is one connected body ({n_bodies} found)", res)
     # files
     for f in r["files"]:
         check(Path(f).exists() and Path(f).stat().st_size > 100, f"file written: {Path(f).name} ({Path(f).stat().st_size} B)", res)

@@ -12,11 +12,21 @@ Coordinate convention (design pose, all mm):
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
 SIDES = ("left", "right", "top", "bottom")
+PATTERN_DEFAULT_PITCH = {"hex": 9.0, "voronoi": 11.0, "grid": 8.5, "waves": 7.0}
+MIN_PATTERN_PITCH = 3.0   # bounds the cell count (and loop count) of every lattice generator
+MIN_PATTERN_WEB = 0.4     # one extrusion width
+MIN_FLOOR = 0.6           # thinnest backplate skin left under a deboss/inlay or pocket
+MAX_TEXT_LEN = 64
+
+
+def _finite(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
 class ParamError(ValueError):
@@ -97,6 +107,7 @@ class Style:
     camera_bead: float = 0.3
     magsafe_ring: bool = False
     magsafe_depth: float = 0.75
+    magsafe_offset_y: float = 0.0     # ring centre shift along Y (- = towards bottom); match the phone's charging coil
 
 
 @dataclass
@@ -229,5 +240,39 @@ class Preset:
             errs.append("pattern.type must be solid|hex|voronoi|grid|waves|svg|text")
         if self.pattern.mode not in ("through", "deboss", "inlay"):
             errs.append("pattern.mode must be through|deboss|inlay")
+        if not _finite(s.magsafe_offset_y):
+            errs.append("style.magsafe_offset_y must be a finite number")
+        errs += self._pattern_errors()
         if errs:
             raise ParamError("; ".join(errs))
+
+    def _pattern_errors(self) -> list[str]:
+        """Pattern numbers drive unbounded `while` loops and boolean depths, so bound them here."""
+        pat, errs = self.pattern, []
+        if not (_finite(pat.web) and pat.web >= MIN_PATTERN_WEB):
+            errs.append(f"pattern.web must be >= {MIN_PATTERN_WEB} mm")
+        if not (_finite(pat.margin) and pat.margin >= 0):
+            errs.append("pattern.margin must be >= 0")
+        if not isinstance(pat.params, dict):
+            return errs + ["pattern.params must be an object"]
+        if pat.type in PATTERN_DEFAULT_PITCH:
+            pitch = pat.params.get("pitch", PATTERN_DEFAULT_PITCH[pat.type])
+            if not (_finite(pitch) and pitch >= MIN_PATTERN_PITCH):
+                errs.append(f"pattern.params.pitch must be a number >= {MIN_PATTERN_PITCH} mm")
+            elif _finite(pat.web) and pitch <= pat.web:
+                errs.append("pattern.params.pitch must be larger than pattern.web")
+        if pat.type == "waves":
+            amp = pat.params.get("amplitude", 3.5)
+            wl = pat.params.get("wavelength", 28.0)
+            if not (_finite(amp) and 0 <= amp <= 50):
+                errs.append("pattern.params.amplitude must be within 0-50 mm")
+            if not (_finite(wl) and wl > 0):
+                errs.append("pattern.params.wavelength must be > 0")
+        if pat.type == "text" and len(str(pat.params.get("text", ""))) > MAX_TEXT_LEN:
+            errs.append(f"pattern.params.text must be <= {MAX_TEXT_LEN} characters")
+        if pat.type != "solid" and pat.mode in ("deboss", "inlay"):
+            max_depth = self.style.backplate_thickness - MIN_FLOOR
+            if not (_finite(pat.depth) and 0 < pat.depth <= max_depth):
+                errs.append(f"pattern.depth must be within 0-{max_depth:.2f} mm "
+                            f"(leaves >= {MIN_FLOOR} mm backplate floor)")
+        return errs

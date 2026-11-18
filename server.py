@@ -261,6 +261,8 @@ def generate_preview(payload: dict):
     try:
         with _cad_lock:
             result = _build_preview(p)
+    except ParamError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"CAD generation error: {exc}") from exc
 
@@ -289,6 +291,8 @@ def export_zip(payload: dict, coupon: bool = Query(default=False)):
     try:
         with _cad_lock:
             data, filename = _build_export_zip(p, coupon)
+    except ParamError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Export failed: {exc}") from exc
 
@@ -350,6 +354,8 @@ def export_part(payload: dict, part: str = Query(...)):
             data, dl_name, media_type = _build_single_part(p, part)
     except HTTPException:
         raise
+    except ParamError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Part export failed: {exc}") from exc
     return Response(

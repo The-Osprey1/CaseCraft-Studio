@@ -953,7 +953,7 @@ export default function App() {
                     label="Deboss / Inlay Depth"
                     value={config.pattern.depth}
                     min={0.4}
-                    max={1.4}
+                    max={Math.max(0.4, (config.style?.backplate_thickness ?? 1.8) - 0.6)}
                     step={0.1}
                     onChange={(v) =>
                       updateConfig((c) => {
@@ -990,6 +990,22 @@ export default function App() {
             className="h-4 w-4 accent-cyan-400"
           />
         </label>
+        {config.style?.magsafe_ring && (
+          <SliderField
+            label="MagSafe Ring Vertical Offset"
+            value={config.style?.magsafe_offset_y ?? 0}
+            min={-30}
+            max={30}
+            step={0.5}
+            hint="Negative moves the ring toward the bottom. Match your phone's charging coil and keep clear of the camera."
+            onChange={(v) =>
+              updateConfig((c) => {
+                c.style.magsafe_offset_y = v;
+                return c;
+              })
+            }
+          />
+        )}
       </div>
     );
   };

@@ -1,0 +1,153 @@
+"""Slow geometry tests: unibody integrity, through-cut connectivity, modular generators intact.
+Run: pytest test_geometry.py   (marked slow; excluded by -m "not slow")"""
+import copy
+import json
+import tempfile
+from pathlib import Path
+
+import pytest
+import trimesh
+from build123d import Vector, export_stl
+
+import cad_engine as ce
+import dfm
+import verify
+from params import ParamError, Preset
+
+pytestmark = pytest.mark.slow
+PRESETS = Path(__file__).parent / "presets"
+
+# representative devices: Apple (5 buttons, both sides), Google (wide camera bar), Samsung
+# (right-side buttons only, small corner radius), OnePlus (round camera, alert slider)
+UNIBODY_CASES = [
+    ("iphone_16_pro", "solid", "through", False),
+    ("iphone_15_pro", "hex", "through", False),
+    ("pixel_9_pro_xl", "text", "inlay", False),
+    ("galaxy_s24_ultra", "voronoi", "deboss", False),
+    ("oneplus_13", "waves", "through", True),
+]
+
+
+def _preset(pid, ptype="solid", mode="through", magsafe=False):
+    p = Preset.load(pid)
+    p.pattern.type, p.pattern.mode = ptype, mode
+    if ptype == "text":
+        p.pattern.params = {"text": "CASE", "size": 0.6}
+    p.style.magsafe_ring = magsafe
+    if magsafe and pid == "oneplus_13":
+        p.style.magsafe_offset_y = -12.0
+    p.validate()
+    return p
+
+
+@pytest.mark.parametrize("pid,ptype,mode,magsafe", UNIBODY_CASES)
+def test_unibody_integrity(pid, ptype, mode, magsafe):
+    p = _preset(pid, ptype, mode, magsafe)
+    u = ce.generate_unibody(p)
+    # one connected, valid, void-free, self-intersection-free solid; single watertight mesh body
+    verify.assert_one_piece(u, pid)
+    # exported STL (what the user downloads) is one watertight body
+    oriented = ce.orient_for_print(u, rot=(0, 0, 0))
+    with tempfile.TemporaryDirectory() as td:
+        stl = Path(td) / "u.stl"
+        export_stl(oriented, str(stl), tolerance=0.01, angular_tolerance=0.1)
+        mr = verify.mesh_report(trimesh.load(stl))
+    assert mr["watertight"] and mr["is_volume"] and mr["bodies"] == 1, mr
+    # external dimensions: bumper envelope (+ button cover pads on sides that carry buttons)
+    pad = p.style.button_cap_height
+    sides = {b.side for b in p.buttons}
+    ex = p.W + 2 * p.outer_offset + pad * (("left" in sides) + ("right" in sides))
+    ey = p.L + 2 * p.outer_offset + pad * (("top" in sides) + ("bottom" in sides))
+    size = verify.bbox_size(u)
+    assert abs(size[0] - ex) < 0.05 and abs(size[1] - ey) < 0.05 and abs(size[2] - p.H) < 0.05, (size, ex, ey, p.H)
+    # print orientation: rear face flat on Z=0 with a large bed contact area
+    bb = oriented.bounding_box()
+    assert abs(bb.min.Z) < 1e-4
+    area, _ = ce._bottom_contact_area(oriented)
+    assert area > 0.5 * p.W * p.L * (0.5 if ptype != "solid" else 1.0)
+    # phone envelope is clear of the case
+    phone = ce.offset_prism(p, 0, p.bp_t, p.bp_t + p.T)
+    assert verify.overlap_volume(phone, u) < 0.01
+    # camera aperture is open through the floor
+    cx, cy = p.camera_center()
+    assert not u.is_inside(Vector(cx, cy, p.bp_t / 2))
+    # button covers: wall is continuous at every button (no window)
+    for b in p.buttons:
+        along = ce.button_along(p, b)
+        mid = p.o + p.style.frame_wall / 2
+        pt = {"right": (p.W / 2 + mid, along), "left": (-p.W / 2 - mid, along),
+              "top": (along, p.L / 2 + mid), "bottom": (along, -p.L / 2 - mid)}[b.side]
+        assert u.is_inside(Vector(pt[0], pt[1], ce.button_zc(p))), f"{b.id}: wall open"
+    # adaptations are reported, not silent
+    notes = " ".join(ce.unibody_adaptations(p))
+    assert "button" in notes and "camera" in notes
+    if mode == "inlay":
+        assert "deboss" in notes
+
+
+def test_unibody_is_support_free():
+    p = _preset("iphone_16_pro")
+    u = ce.orient_for_print(ce.generate_unibody(p), rot=(0, 0, 0))
+    _, bridges, fails = dfm.classify(dfm.overhang_clusters(u), p.style.frame_wall)
+    assert not fails, fails
+
+
+def test_modular_parts_unchanged_by_unibody():
+    """The unibody must not alter the modular generators (separate code path)."""
+    p = _preset("iphone_15_pro")
+    frame_before = ce.generate_frame(p).volume
+    plate_before = ce.generate_backplate(p, with_pattern=False).volume
+    ce.generate_unibody(p)
+    assert ce.generate_frame(p).volume == pytest.approx(frame_before)
+    assert ce.generate_backplate(p, with_pattern=False).volume == pytest.approx(plate_before)
+    assert p.clearances.backplate_snap_clearance > 0          # preset not mutated
+
+
+def test_disconnected_through_cut_rejected_with_explanation():
+    p = _preset("iphone_15_pro", "text", "through")
+    p.pattern.params = {"text": "BOA", "size": 0.6}
+    p.pattern.stencil_bridges = False
+    conn = ce.through_cut_connectivity(p)
+    assert len(conn["islands"]) == 4                   # B (2 counters), O, A
+    with pytest.raises(ParamError) as exc:
+        ce.generate_backplate(p)
+    msg = str(exc.value)
+    assert "4 disconnected regions" in msg and "stencil bridges" in msg
+    with pytest.raises(ParamError):
+        ce.generate_unibody(p)
+    # stencil bridges keep the same design connected (existing behaviour preserved)
+    p.pattern.stencil_bridges = True
+    assert ce.through_cut_connectivity(p)["islands"] == []
+    plate, _ = ce.generate_backplate(p)
+    assert len(plate.solids()) == 1
+
+
+def test_lattice_with_zero_margin_rejected():
+    p = _preset("iphone_15_pro", "waves", "through")
+    p.pattern.margin = 0.0
+    with pytest.raises(ParamError, match="disconnected"):
+        ce.generate_backplate(p)
+
+
+def test_deboss_and_inlay_never_rejected_for_islands():
+    p = _preset("iphone_15_pro", "text", "deboss")
+    p.pattern.params = {"text": "BOA"}
+    p.pattern.stencil_bridges = False
+    plate, inlay = ce.generate_backplate(p)
+    assert len(plate.solids()) == 1 and inlay is None
+
+
+@pytest.mark.parametrize("ptype", ["hex", "voronoi", "grid", "waves"])
+def test_default_lattices_are_connected(ptype):
+    p = _preset("iphone_16_pro", ptype, "through")
+    conn = ce.through_cut_connectivity(p)
+    assert conn["islands"] == [] and conn["thin_necks"] == 0, conn
+
+
+def test_api_rejects_disconnected_pattern():
+    from fastapi.testclient import TestClient
+    from server import app
+    d = json.loads((PRESETS / "iphone_15_pro.json").read_text(encoding="utf-8"))
+    d["pattern"] = {"type": "text", "mode": "through", "stencil_bridges": False, "params": {"text": "OO"}}
+    r = TestClient(app).post("/generate-preview", json=d)
+    assert r.status_code == 422 and "disconnected" in r.json()["detail"], r.text

@@ -23,6 +23,30 @@ MIN_PATTERN_PITCH = 3.0   # bounds the cell count (and loop count) of every latt
 MIN_PATTERN_WEB = 0.4     # one extrusion width
 MIN_FLOOR = 0.6           # thinnest backplate skin left under a deboss/inlay or pocket
 MAX_TEXT_LEN = 64
+MIN_WALL = 1.0            # thinnest TPU side wall accepted
+PATTERN_TYPES = ("solid", "hex", "voronoi", "grid", "waves", "svg", "text")
+PATTERN_MODES = ("through", "deboss", "inlay")
+# (name, hard min, hard max, recommended min, recommended max). Hard limits match the JSON
+# schema; the recommended band is CaseCraft's default tuning range, NOT a physically validated
+# tolerance -- outside it we warn and point at the fit-test coupon.
+CLEARANCE_LIMITS = (
+    ("frame_to_phone_offset", 0.0, 1.0, 0.10, 0.40),
+    ("backplate_snap_clearance", 0.05, 0.4, 0.10, 0.25),
+    ("button_clearance", 0.05, 0.5, 0.15, 0.35),
+    ("camera_ring_clearance", 0.05, 0.4, 0.10, 0.25),
+)
+
+
+def wave_cos(amplitude: float, wavelength: float) -> float:
+    """cos of the steepest slope of the waves pattern's sine bands."""
+    return math.cos(math.atan(2 * math.pi * amplitude / max(wavelength, 6.0)))
+
+
+def wave_min_rib(pitch: float, web: float, amplitude: float, wavelength: float) -> float:
+    """Narrowest rib left between waves bands (slot width is clamped to >= 1 mm)."""
+    spacing = pitch * wave_cos(amplitude, wavelength)
+    slot = max(1.0, spacing - web)
+    return spacing - slot
 
 
 def _finite(v) -> bool:
@@ -198,53 +222,184 @@ class Preset:
         return (self.W / 2 - (c.x + c.width / 2), self.L / 2 - (c.y + c.height / 2))
 
     # ---- validation ---------------------------------------------------
+    # Single authoritative source for parameter rules. `check()` returns (errors, warnings):
+    # errors make a design unbuildable/unprintable and are raised by `validate()` (-> HTTP 422,
+    # CLI exit 2); warnings are legitimate-but-risky choices surfaced to the user.
     def validate(self) -> None:
+        errs, _ = self.check()
+        if errs:
+            raise ParamError("; ".join(errs))
+
+    def warnings(self) -> list[str]:
+        return self.check()[1]
+
+    def check(self) -> tuple[list[str], list[str]]:
+        errs = self._type_errors()
+        if errs:                      # geometry rules below assume finite numbers
+            return errs, []
+        warns: list[str] = []
         b, s, c = self.body, self.style, self.clearances
-        errs = []
         for n, v in (("length", b.length), ("width", b.width), ("thickness", b.thickness)):
             if v <= 0: errs.append(f"body.{n} must be > 0")
         if b.corner_radius < 0 or b.corner_radius > min(b.length, b.width) / 2:
             errs.append("body.corner_radius out of range")
+        if errs:
+            return errs, warns
+        # -- clearances: hard limits (schema) + recommended tuning range (warnings)
+        for name, lo, hi, rlo, rhi in CLEARANCE_LIMITS:
+            v = getattr(c, name)
+            if not lo <= v <= hi:
+                errs.append(f"clearances.{name} must be within {lo:g}-{hi:g} mm")
+            elif not rlo <= v <= rhi:
+                side = "below" if v < rlo else "above"
+                warns.append(f"clearances.{name} {v:g} mm is {side} the recommended range "
+                             f"({rlo:g}-{rhi:g} mm); print a fit-test coupon before a full case")
+        # -- positive style dimensions
+        for name in ("frame_wall", "front_lip", "front_lip_thickness", "tongue_height", "groove_depth",
+                     "snap_engage", "button_height", "button_cap_height", "button_flange_overhang",
+                     "button_flange_thickness", "camera_bezel_height", "camera_bezel_width"):
+            if getattr(s, name) <= 0:
+                errs.append(f"style.{name} must be > 0")
+        for name in ("button_travel", "camera_cutout_margin", "camera_aperture_margin", "camera_bead"):
+            if getattr(s, name) < 0:
+                errs.append(f"style.{name} must be >= 0")
+        if errs:
+            return errs, warns
+        # -- walls, snap joint and screen lip
+        if s.frame_wall < MIN_WALL:
+            errs.append(f"style.frame_wall must be >= {MIN_WALL} mm")
         if not 1.6 <= s.backplate_thickness <= 2.0:
             errs.append("style.backplate_thickness must be within 1.6-2.0 mm")
         if s.tongue_height >= s.backplate_thickness - 0.6:
             errs.append("tongue_height leaves < 0.6 mm plate body")
         if s.groove_depth > 0.6 * s.frame_wall:
             errs.append("groove_depth > 60% of frame_wall (TPU wall too thin)")
+        if s.frame_wall - s.groove_depth < MIN_FLOOR:
+            errs.append(f"frame_wall - groove_depth leaves < {MIN_FLOOR} mm TPU behind the retention groove")
+        if s.backplate_thickness - s.tongue_height - c.backplate_snap_clearance < MIN_FLOOR:
+            errs.append(f"rear retaining lip under the groove is < {MIN_FLOOR} mm thick "
+                        "(reduce tongue_height or snap clearance)")
         if s.snap_engage <= c.backplate_snap_clearance + 0.2:
             errs.append("snap_engage must exceed snap clearance by >= 0.2 mm")
         if s.snap_engage >= s.groove_depth:
             errs.append("snap_engage must be < groove_depth")
-        if s.button_height > b.thickness - 1.0:
-            errs.append("button_height too large for phone thickness")
         if s.front_lip_thickness < self.o + s.front_lip + 0.6:
             errs.append("front_lip_thickness must cover the 45deg lip ramp (o + front_lip) plus >= 0.6 mm land")
+        if s.front_lip < 0.6:
+            warns.append(f"style.front_lip {s.front_lip:g} mm is a very narrow screen lip; the phone may pop out")
+        # -- buttons
+        if s.button_height > b.thickness - 1.0:
+            errs.append("button_height too large for phone thickness")
         if s.frame_wall - (s.button_flange_thickness + s.button_travel) < 0.6:
             errs.append("button pocket leaves < 0.6 mm TPU retaining ring")
-        cam = self.camera
-        cx, cy = self.camera_center()
-        m = s.camera_cutout_margin
-        bz = s.camera_bezel_width
-        if abs(cx) + cam.width / 2 + m + bz > b.width / 2 - 0.3 or abs(cy) + cam.height / 2 + m + bz > b.length / 2 - 0.3:
-            errs.append("camera island (with margin) plus bezel must stay inside the phone outline")
+        pocket_half = s.button_height / 2 + s.button_flange_overhang + c.button_clearance
+        if pocket_half > b.thickness / 2 - c.backplate_snap_clearance:
+            errs.append("button flange pocket is taller than the side wall between groove and screen lip "
+                        "(reduce button_height or button_flange_overhang)")
+        spans: dict[str, list] = {sd: [] for sd in SIDES}
         for bt in self.buttons:
-            if bt.side not in SIDES: errs.append(f"button {bt.id}: bad side")
+            if bt.side not in SIDES:
+                errs.append(f"button {bt.id}: bad side")
+                continue
+            if bt.length <= 0:
+                errs.append(f"button {bt.id}: length must be > 0")
+                continue
             edge = b.length if bt.side in ("left", "right") else b.width
             if bt.pos < b.corner_radius or bt.pos + bt.length > edge - b.corner_radius:
                 errs.append(f"button {bt.id} overlaps a corner (pos/length)")
+            grow = s.button_flange_overhang + c.button_clearance
+            spans[bt.side].append((bt.pos - grow, bt.pos + bt.length + grow, f"button {bt.id}"))
+        for sd, items in spans.items():
+            items.sort()
+            for (a0, a1, an), (b0, b1, bn) in zip(items, items[1:]):
+                gap = b0 - a1
+                if gap < 0:
+                    errs.append(f"{an} and {bn} pockets overlap on the {sd} side")
+                elif gap < 1.0:
+                    warns.append(f"only {gap:.2f} mm of TPU between the {an} and {bn} pockets")
+        # -- ports
+        port_spans: dict[str, list] = {sd: [] for sd in SIDES}
         for pt in self.ports:
-            if pt.side not in SIDES: errs.append(f"port {pt.id}: bad side")
+            if pt.side not in SIDES:
+                errs.append(f"port {pt.id}: bad side")
+                continue
+            if pt.width <= 0 or pt.height <= 0 or pt.radius < 0:
+                errs.append(f"port {pt.id}: width/height must be > 0 and radius >= 0")
+                continue
+            edge = b.length if pt.side in ("left", "right") else b.width
+            half = edge / 2
+            reach = abs(pt.center) + pt.width / 2
+            if reach > half:
+                errs.append(f"port {pt.id} extends past the end of the {pt.side} edge")
+            elif reach > half - b.corner_radius:
+                warns.append(f"port {pt.id} runs into the rounded corner of the {pt.side} edge")
+            if pt.height / 2 + abs(pt.z_offset) > b.thickness / 2 + self.o:
+                errs.append(f"port {pt.id} opening cuts into the screen lip or backplate groove "
+                            "(reduce height or z_offset)")
+            # along-edge coordinate measured like button pos (from the top / front-view left)
+            along = (half - pt.center) if pt.side in ("left", "right") else (half + pt.center)
+            port_spans[pt.side].append((along - pt.width / 2, along + pt.width / 2, f"port {pt.id}"))
+        for sd in SIDES:
+            ports = sorted(port_spans[sd])
+            for (a0, a1, an), (b0, b1, bn) in zip(ports, ports[1:]):
+                if b0 < a1:
+                    warns.append(f"{an} and {bn} overlap and will merge into one opening")
+            for p0, p1, pn in ports:
+                for b0, b1, bn in spans[sd]:
+                    if p0 < b1 and b0 < p1:
+                        errs.append(f"{pn} overlaps the {bn} pocket on the {sd} side")
+        # -- camera
+        cam = self.camera
+        if cam.width <= 0 or cam.height <= 0 or cam.radius < 0:
+            errs.append("camera width/height must be > 0 and radius >= 0")
+        else:
+            cx, cy = self.camera_center()
+            m = s.camera_cutout_margin
+            bz = s.camera_bezel_width
+            if abs(cx) + cam.width / 2 + m + bz > b.width / 2 - 0.3 or abs(cy) + cam.height / 2 + m + bz > b.length / 2 - 0.3:
+                errs.append("camera island (with margin) plus bezel must stay inside the phone outline")
+        # -- MagSafe, pattern
         if s.magsafe_ring and (s.backplate_thickness - s.magsafe_depth < 0.7 or s.magsafe_depth <= 0):
             errs.append("magsafe_depth must leave >= 0.7 mm backplate floor")
-        if self.pattern.type not in ("solid", "hex", "voronoi", "grid", "waves", "svg", "text"):
-            errs.append("pattern.type must be solid|hex|voronoi|grid|waves|svg|text")
-        if self.pattern.mode not in ("through", "deboss", "inlay"):
-            errs.append("pattern.mode must be through|deboss|inlay")
-        if not _finite(s.magsafe_offset_y):
-            errs.append("style.magsafe_offset_y must be a finite number")
+        if self.pattern.type not in PATTERN_TYPES:
+            errs.append("pattern.type must be " + "|".join(PATTERN_TYPES))
+        if self.pattern.mode not in PATTERN_MODES:
+            errs.append("pattern.mode must be " + "|".join(PATTERN_MODES))
         errs += self._pattern_errors()
-        if errs:
-            raise ParamError("; ".join(errs))
+        if (not errs and self.pattern.type not in ("solid", "svg", "text")
+                and self.pattern.web < 2 * MIN_PATTERN_WEB):
+            warns.append(f"pattern.web {self.pattern.web:g} mm is below two extrusion widths "
+                         f"({2 * MIN_PATTERN_WEB:g} mm); the lattice ribs will be fragile")
+        if not errs and self.pattern.type == "waves":
+            pr = self.pattern.params
+            rib = wave_min_rib(pr.get("pitch", PATTERN_DEFAULT_PITCH["waves"]), self.pattern.web,
+                               pr.get("amplitude", 3.5), pr.get("wavelength", 28.0))
+            if rib < self.pattern.web - 1e-6:
+                warns.append(f"waves: ribs narrow to {rib:.2f} mm at the steepest point "
+                             f"(below the {self.pattern.web:g} mm web); increase pitch or wavelength")
+        return errs, warns
+
+    def _type_errors(self) -> list[str]:
+        """Every numeric field must be a finite number and every flag a bool, whatever the source
+        (JSON, form input, CLI). Catches NaN/inf/strings before any geometry is attempted."""
+        errs = []
+        groups = [("body", self.body), ("camera", self.camera), ("clearances", self.clearances),
+                  ("style", self.style), ("pattern", self.pattern)]
+        groups += [(f"buttons[{i}]", bt) for i, bt in enumerate(self.buttons)]
+        groups += [(f"ports[{i}]", pt) for i, pt in enumerate(self.ports)]
+        for gname, obj in groups:
+            for f in fields(obj):
+                v = getattr(obj, f.name)
+                if f.type in ("float", float):
+                    if not _finite(v):
+                        errs.append(f"{gname}.{f.name} must be a finite number")
+                elif f.type in ("bool", bool):
+                    if not isinstance(v, bool):
+                        errs.append(f"{gname}.{f.name} must be true or false")
+                elif f.type in ("str", str):
+                    if not isinstance(v, str):
+                        errs.append(f"{gname}.{f.name} must be a string")
+        return errs
 
     def _pattern_errors(self) -> list[str]:
         """Pattern numbers drive unbounded `while` loops and boolean depths, so bound them here."""
@@ -268,6 +423,13 @@ class Preset:
                 errs.append("pattern.params.amplitude must be within 0-50 mm")
             if not (_finite(wl) and wl > 0):
                 errs.append("pattern.params.wavelength must be > 0")
+            elif _finite(amp) and _finite(pitch) and 0 <= amp <= 50:
+                # rib between bands, measured perpendicular to the steepest part of the curve
+                # (slots never go below 1 mm): see cad_engine._wave_polys
+                rib = wave_min_rib(pitch, pat.web, amp, wl)
+                if rib < MIN_PATTERN_WEB:
+                    errs.append(f"waves too steep for this pitch: ribs would be {max(rib, 0):.2f} mm wide "
+                                f"(< {MIN_PATTERN_WEB} mm); increase pitch or wavelength, or reduce amplitude")
         if pat.type == "text" and len(str(pat.params.get("text", ""))) > MAX_TEXT_LEN:
             errs.append(f"pattern.params.text must be <= {MAX_TEXT_LEN} characters")
         if pat.type != "solid" and pat.mode in ("deboss", "inlay"):

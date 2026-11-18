@@ -175,11 +175,16 @@ if __name__ == "__main__":
     ap.add_argument("--coupon", action="store_true")
     ap.add_argument("--magsafe", action="store_true")
     a = ap.parse_args()
-    if a.coupon:
-        results = run_coupon(a.preset, a.out)
-    else:
-        results, timings = run(a.preset, a.pattern, a.mode, a.out, magsafe=a.magsafe)
-        results += stress()
+    from params import ParamError
+    try:
+        if a.coupon:
+            results = run_coupon(a.preset, a.out)
+        else:
+            results, timings = run(a.preset, a.pattern, a.mode, a.out, magsafe=a.magsafe)
+            results += stress()
+    except ParamError as exc:            # same message the API returns as HTTP 422
+        print(f"INVALID DESIGN: {exc}")
+        sys.exit(2)
     bad = [m for ok, m in results if not ok]
     print(f"\n{len(results) - len(bad)}/{len(results)} checks passed")
     sys.exit(1 if bad else 0)

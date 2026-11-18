@@ -333,7 +333,7 @@ def _build_single_part(p: Preset, part: str) -> tuple[bytes, str, str]:
             ce.laser_svg(p, svg_path)
             return svg_path.read_bytes(), f"{p.id}_{filename}", media_type
         if part == "unibody_stl":
-            uni = ce.orient_for_print(ce.generate_unibody(p), rot=(0, 0, 0))
+            uni = ce.print_ready_unibody(p)
             return _shape_to_stl_bytes(uni, tol=0.01, ang=0.1), f"{p.id}_{filename}", media_type
 
         res = ce.export_set(p, out_dir)

@@ -14,5 +14,6 @@
     {"id": "usbc", "side": "bottom", "center": 0.0, "width": 13.0, "height": 7.0, "radius": 3.4},
     {"id": "speaker_l", "side": "bottom", "center": -18.0, "width": 14.0, "height": 3.0, "radius": 1.4},
     {"id": "speaker_r", "side": "bottom", "center": 18.0, "width": 14.0, "height": 3.0, "radius": 1.4}
-  ]
+  ],
+  "verification": {"level": "approximate", "source": "Not recorded: shipped with the initial CaseCraft release as an approximation", "fit_test": "untested", "notes": "Verify every dimension with calipers and print a fit-test coupon before a full case.", "unverified_features": ["body", "camera", "buttons", "ports"]}
 }

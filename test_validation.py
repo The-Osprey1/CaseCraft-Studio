@@ -133,6 +133,57 @@ def test_steep_waves_rejected_or_warned():
     assert not any("waves" in w for w in Preset.from_dict(d).warnings())
 
 
+def test_verification_metadata():
+    for path in sorted(PRESETS.glob("*.json")):          # shipped presets: honest, approximate
+        v = Preset.load(path).verification
+        assert v.level == "approximate" and v.fit_test == "untested" and v.source
+    d = _raw()
+    del d["verification"]                                  # pre-metadata preset files still load
+    assert Preset.from_dict(d).verification.level == "approximate"
+    d["verification"] = {"level": "physically_fit_tested", "fit_test": "untested"}
+    assert "requires fit_test 'passed'" in _errors(d)
+    d["verification"] = {"level": "verified"}
+    assert "verification.level must be" in _errors(d)
+    d["verification"] = {"level": "dimensionally_verified", "source": "calipers", "unverified_features": "camera"}
+    assert "unverified_features must be a list" in _errors(d)
+
+
+def test_camera_opening_rules():
+    d = _raw()
+    assert Preset.from_dict(d).camera.opening is None     # existing camera definitions unchanged
+    d["camera"]["opening"] = {"width": 33.0, "height": 35.0, "radius": 8.0, "dx": 0.5}
+    p = Preset.from_dict(d)
+    base, outer = p.aperture_profiles()
+    assert outer == (33.0, 35.0, 8.0, -0.5, 0.0) and base[0] == pytest.approx(36.4)
+    d["camera"]["opening"] = {"width": 40.0, "height": 42.0, "radius": 10.0}
+    assert "camera_cutout_margin" in _errors(d)          # flare thins the ring spigot
+    d["style"] = {"camera_cutout_margin": 3.0}
+    d["camera"]["x"], d["camera"]["y"] = 8.0, 8.0          # room for the wider cutout
+    msgs = Preset.from_dict(d).warnings()                # legal with more margin; steep for the unibody floor
+    assert any("Unibody: the camera opening flare" in w for w in msgs)
+    d["camera"]["opening"] = {"width": 33.0, "height": 35.0, "radius": 20.0}
+    assert "radius must be <=" in _errors(d)
+    d["camera"]["opening"] = {"width": 33.0, "height": float("nan")}
+    assert "camera.opening.height" in _errors(d)
+    d["camera"]["opening"] = {"width": 33.0, "height": 35.0, "depth": 2}
+    assert "unknown keys" in _errors(d)
+
+
+def test_schema_documents_every_field():
+    """The JSON schema is documentation; keep its keys in step with params.py (the authority)."""
+    from dataclasses import fields as dc_fields
+    from params import Body, Camera, CameraOpening, Clearances, Pattern, Verification
+    sc = json.loads((Path(__file__).parent / "schema" / "phone_preset.schema.json").read_text(encoding="utf-8"))
+    props = sc["properties"]
+    for key, cls in (("body", Body), ("camera", Camera), ("clearances", Clearances), ("pattern", Pattern),
+                     ("verification", Verification)):
+        assert {f.name for f in dc_fields(cls)} == set(props[key]["properties"]), key
+    assert {f.name for f in dc_fields(CameraOpening)} == set(props["camera"]["properties"]["opening"]["properties"])
+    for name, lo, hi, _, _ in __import__("params").CLEARANCE_LIMITS:
+        c = props["clearances"]["properties"][name]
+        assert (c["minimum"], c["maximum"]) == (lo, hi), name
+
+
 def test_unknown_keys_rejected():
     d = _raw()
     d["style"] = {"frame_wal": 1.6}

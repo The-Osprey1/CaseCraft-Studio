@@ -230,11 +230,24 @@ def _polys(geom) -> list[Polygon]:
     return [g for g in gs if g.geom_type == "Polygon" and g.area > 0.5]
 
 
-def camera_aperture_solid(p: Preset, z0: float, z1: float) -> Solid:
-    """Camera lens aperture (island + aperture margin), centred on the island, between z0 and z1."""
-    m = p.style.camera_aperture_margin
-    c = p.camera
-    return rrect_prism(c.width + 2 * m, c.height + 2 * m, c.radius + m, z0, z1)
+def _rr_wire(w, h, r, ox, oy, z):
+    r = safe_corner_radius(r, w, h)
+    return (Pos(ox, oy, z) * RectangleRounded(w, h, max(r, 0.05)).face()).outer_wire()
+
+
+def camera_aperture_cutters(p: Preset, z_outer: float, z_base: float) -> list[Solid]:
+    """Camera aperture cutters, centred on the island: the outer-face profile at z_outer, the
+    island base (+ aperture margin) at z_base, ruled-lofted in between when they differ (optional
+    camera.opening), and extended 1 mm past both faces so the cut is clean."""
+    base, outer = p.aperture_profiles()
+    if outer == base:
+        return [rrect_prism(base[0], base[1], base[2], z_outer - 1.0, z_base + 1.0)]
+    loft = Solid.make_loft([_rr_wire(*outer, z_outer), _rr_wire(*base, z_base)], ruled=True)
+    if not _is_valid(loft):
+        raise ParamError("camera.opening produced an invalid aperture loft; check its size and offset")
+    below = Pos(outer[3], outer[4], 0) * rrect_prism(outer[0], outer[1], outer[2], z_outer - 1.0, z_outer + EPS)
+    above = rrect_prism(base[0], base[1], base[2], z_base - EPS, z_base + 1.0)
+    return [below, loft, above]
 
 
 def magsafe_ring_poly(p: Preset) -> Polygon:
@@ -673,7 +686,8 @@ def generate_camera_ring(p: Preset) -> Solid:
     bead = rrect_prism(sw + 2 * s.camera_bead, sh + 2 * s.camera_bead, sr + s.camera_bead, p.bp_t - 0.5, p.bp_t)
     bead = safe_chamfer(bead, _top_face_outer_edges(bead, p.bp_t), 0.3, limit=0.5)
     ring = flange.fuse(spigot, bead)
-    ring = ring.cut(camera_aperture_solid(p, -bz - 1, p.bp_t + 1))
+    for cutter in camera_aperture_cutters(p, -bz, p.bp_t):
+        ring = ring.cut(cutter)
     # relief slots (4) so the bead can flex
     slot = 0.6
     for sx, sy, sz in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0)):
@@ -870,7 +884,7 @@ def generate_unibody(p: Preset) -> Solid:
         q.pattern.mode = "deboss"            # explicit adaptation, reported by unibody_adaptations()
     cuts = _cavity_and_lip_cuts(q, q.bp_t) + _port_cutters(q)
     cx, cy = q.camera_center()
-    cuts.append(Pos(cx, cy, 0) * camera_aperture_solid(q, -1.0, q.bp_t + 1.0))
+    cuts += [Pos(cx, cy, 0) * t for t in camera_aperture_cutters(q, 0.0, q.bp_t)]
     body = _frame_outer(q)
     for cutter in cuts:
         body = body.cut(cutter)

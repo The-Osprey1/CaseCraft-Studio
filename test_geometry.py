@@ -151,3 +151,28 @@ def test_api_rejects_disconnected_pattern():
     d["pattern"] = {"type": "text", "mode": "through", "stencil_bridges": False, "params": {"text": "OO"}}
     r = TestClient(app).post("/generate-preview", json=d)
     assert r.status_code == 422 and "disconnected" in r.json()["detail"], r.text
+
+
+def test_camera_opening_loft_geometry():
+    """Optional outer-opening profile: ring and unibody stay single valid solids, the aperture
+    matches the opening at the outer face and the island base at the phone, and presets
+    without an opening build exactly as before."""
+    d = json.loads((PRESETS / "iphone_15_pro.json").read_text(encoding="utf-8"))
+    base_ring = ce.generate_camera_ring(Preset.from_dict(d))
+    d["camera"]["opening"] = {"width": 33.0, "height": 35.0, "radius": 8.0, "dx": 0.5}
+    p = Preset.from_dict(d)
+    ring, uni = ce.generate_camera_ring(p), ce.generate_unibody(p)
+    for shape in (ring, uni):
+        sr = verify.solid_report(shape)
+        assert sr["valid"] and sr["solids"] == 1 and sr["shells"] == 1 and sr["self_intersection_free"], sr
+    cx, cy = p.camera_center()
+    ox = cx - 0.5                                     # +dx (back view right) == -X in design coords
+    zo, zb = -p.style.camera_bezel_height + 0.05, p.bp_t - 0.05
+    assert ring.is_inside(Vector(ox + 16.5 + 0.3, cy, zo))       # just outside the 33 mm opening: material
+    assert not ring.is_inside(Vector(ox + 16.5 - 0.3, cy, zo))   # just inside: open
+    assert not ring.is_inside(Vector(cx + 18.2 - 0.3, cy, zb))   # island base + margin is open at the phone
+    assert ring.volume > base_ring.volume                        # tapered opening keeps more bezel
+    assert not uni.is_inside(Vector(ox, cy, 0.05))               # open at the unibody's outer face
+    assert ce.generate_camera_ring(Preset.from_dict({**d, "camera": {k: v for k, v in d["camera"].items()
+                                                                     if k != "opening"}})).volume \
+        == pytest.approx(base_ring.volume)

@@ -57,6 +57,14 @@ class ParamError(ValueError):
     pass
 
 
+def _build_camera(data: dict | None):
+    data = dict(data or {})
+    opening = data.pop("opening", None)
+    cam = _build(Camera, data)
+    cam.opening = _build(CameraOpening, opening) if opening is not None else None
+    return cam
+
+
 def _build(cls, data: dict | None):
     data = dict(data or {})
     names = {f.name for f in fields(cls)}
@@ -75,12 +83,27 @@ class Body:
 
 
 @dataclass
+class CameraOpening:
+    """Optional clear aperture at the case's OUTER face (ring bezel / unibody back). The camera
+    island's width/height/radius stay the profile at its BASE (against the phone back); the
+    aperture is lofted between the two, so a bump that is wider at its base, or an opening that
+    flares for a wide-angle lens, no longer forces one oversized cutout. dx/dy shift the opening
+    centre from the island centre, measured like camera.x/y on the BACK view (+dx right, +dy down)."""
+    width: float = 0.0
+    height: float = 0.0
+    radius: float = 0.0
+    dx: float = 0.0
+    dy: float = 0.0
+
+
+@dataclass
 class Camera:
     x: float = 3.5
     y: float = 3.5
-    width: float = 36.0
+    width: float = 36.0       # island at its base (phone back)
     height: float = 38.0
     radius: float = 9.0
+    opening: CameraOpening | None = None   # optional outer-face profile (see CameraOpening)
 
 
 @dataclass
@@ -182,7 +205,7 @@ class Preset:
             id=d.pop("id", "custom"),
             name=d.pop("name", "Custom"),
             body=_build(Body, d.pop("body", None)),
-            camera=_build(Camera, d.pop("camera", None)),
+            camera=_build_camera(d.pop("camera", None)),
             buttons=[_build(Button, b) for b in d.pop("buttons", [])],
             ports=[_build(Port, b) for b in d.pop("ports", [])],
             clearances=_build(Clearances, d.pop("clearances", None)),
@@ -234,6 +257,16 @@ class Preset:
     def tongue_offset(self): return self.groove_offset - self.sc
     @property
     def outer_offset(self): return self.o + self.style.frame_wall
+
+    def aperture_profiles(self):
+        """(base, outer) clear camera apertures as (w, h, r, ox, oy), offsets relative to the
+        island centre in DESIGN coordinates. Without an opening both are the island + margin."""
+        c, m = self.camera, self.style.camera_aperture_margin
+        base = (c.width + 2 * m, c.height + 2 * m, c.radius + m, 0.0, 0.0)
+        if c.opening is None:
+            return base, base
+        o = c.opening
+        return base, (o.width, o.height, o.radius, -o.dx, -o.dy)   # back view -> design coords
 
     def camera_center(self) -> tuple[float, float]:
         c = self.camera
@@ -376,6 +409,10 @@ class Preset:
             bz = s.camera_bezel_width
             if abs(cx) + cam.width / 2 + m + bz > b.width / 2 - 0.3 or abs(cy) + cam.height / 2 + m + bz > b.length / 2 - 0.3:
                 errs.append("camera island (with margin) plus bezel must stay inside the phone outline")
+            if cam.opening is not None:
+                e, w = self._camera_opening_rules()
+                errs += e
+                warns += w
         # -- MagSafe, pattern
         if s.magsafe_ring and (s.backplate_thickness - s.magsafe_depth < 0.7 or s.magsafe_depth <= 0):
             errs.append("magsafe_depth must leave >= 0.7 mm backplate floor")
@@ -397,6 +434,44 @@ class Preset:
                              f"(below the {self.pattern.web:g} mm web); increase pitch or wavelength")
         return errs, warns
 
+    def _camera_opening_rules(self) -> tuple[list[str], list[str]]:
+        """Keep the lofted aperture buildable and printable: positive profile, walls left in the
+        ring flange and spigot, and no inward lean steeper than 45 deg (the ring prints outer
+        face down, the unibody back-down)."""
+        errs, warns = [], []
+        o, s, c = self.camera.opening, self.style, self.clearances
+        if o.width <= 0 or o.height <= 0 or o.radius < 0:
+            return ["camera.opening width/height must be > 0 and radius >= 0"], []
+        if o.radius > min(o.width, o.height) / 2:
+            errs.append("camera.opening.radius must be <= half the opening width/height")
+        base, outer = self.aperture_profiles()
+        cut_w = self.camera.width + 2 * s.camera_cutout_margin
+        cut_h = self.camera.height + 2 * s.camera_cutout_margin
+        bz, bp = s.camera_bezel_height, self.bp_t
+        # flange wall at the outer face
+        for half_out, size, off, axis in ((cut_w / 2 + s.camera_bezel_width, outer[0], outer[3], "width"),
+                                          (cut_h / 2 + s.camera_bezel_width, outer[1], outer[4], "height")):
+            if half_out - (abs(off) + size / 2) < 0.8:
+                errs.append(f"camera.opening leaves < 0.8 mm of camera-ring bezel ({axis}); reduce the opening or its offset")
+        # spigot wall where the ring passes through the backplate (z = 0)
+        t = bz / (bz + bp)
+        mid = [outer[i] + t * (base[i] - outer[i]) for i in range(5)]
+        for half_sp, size, off, axis in ((cut_w / 2 - c.camera_ring_clearance, mid[0], mid[3], "width"),
+                                         (cut_h / 2 - c.camera_ring_clearance, mid[1], mid[4], "height")):
+            if half_sp - (abs(off) + size / 2) < 0.6:
+                errs.append(f"camera.opening leaves < 0.6 mm of camera-ring wall inside the backplate ({axis}); "
+                            "reduce the flare or increase style.camera_cutout_margin")
+        # inward lean of the aperture wall going up from the outer face (overhang)
+        lean = max(-base[0] / 2 - (outer[3] - outer[0] / 2), (outer[3] + outer[0] / 2) - base[0] / 2,
+                   -base[1] / 2 - (outer[4] - outer[1] / 2), (outer[4] + outer[1] / 2) - base[1] / 2)
+        if lean > bz + bp:
+            errs.append(f"camera.opening flares {lean:.2f} mm beyond the base over {bz + bp:.2f} mm of ring height "
+                        "(> 45 deg overhang); reduce the flare")
+        elif lean > bp:
+            warns.append(f"Unibody: the camera opening flare ({lean:.2f} mm) is steeper than 45 deg across the "
+                         f"{bp:g} mm floor and will need support there")
+        return errs, warns
+
     def _type_errors(self) -> list[str]:
         """Every numeric field must be a finite number and every flag a bool, whatever the source
         (JSON, form input, CLI). Catches NaN/inf/strings before any geometry is attempted."""
@@ -406,6 +481,8 @@ class Preset:
         groups += [(f"buttons[{i}]", bt) for i, bt in enumerate(self.buttons)]
         groups += [(f"ports[{i}]", pt) for i, pt in enumerate(self.ports)]
         groups += [("verification", self.verification)]
+        if self.camera.opening is not None:
+            groups += [("camera.opening", self.camera.opening)]
         v = self.verification
         if v.level not in VERIFICATION_LEVELS:
             errs.append("verification.level must be " + "|".join(VERIFICATION_LEVELS))

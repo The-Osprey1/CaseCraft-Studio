@@ -1,0 +1,14 @@
+{
+  "id": "galaxy_s24_ultra", "name": "Galaxy S24 Ultra (approx - verify with calipers)",
+  "body": {"length": 162.3, "width": 79.0, "thickness": 8.6, "corner_radius": 6.5},
+  "camera": {"x": 6.5, "y": 8.0, "width": 20.0, "height": 55.0, "radius": 10.0},
+  "buttons": [
+    {"id": "volume", "side": "right", "pos": 52.0, "length": 24.0},
+    {"id": "power", "side": "right", "pos": 86.0, "length": 14.0}
+  ],
+  "ports": [
+    {"id": "usbc", "side": "bottom", "center": 0.0, "width": 13.0, "height": 7.0, "radius": 3.4},
+    {"id": "speaker", "side": "bottom", "center": -20.0, "width": 14.0, "height": 3.0, "radius": 1.4},
+    {"id": "spen", "side": "bottom", "center": 24.0, "width": 9.0, "height": 6.0, "radius": 2.5}
+  ]
+}

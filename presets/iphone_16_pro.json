@@ -1,0 +1,17 @@
+{
+  "id": "iphone_16_pro", "name": "iPhone 16 Pro (approx - verify with calipers)",
+  "body": {"length": 149.6, "width": 71.5, "thickness": 8.25, "corner_radius": 11.5},
+  "camera": {"x": 4.0, "y": 4.0, "width": 37.0, "height": 38.5, "radius": 9.5},
+  "buttons": [
+    {"id": "power", "side": "right", "pos": 50.0, "length": 22.0},
+    {"id": "camera_control", "side": "right", "pos": 100.0, "length": 14.0},
+    {"id": "action", "side": "left", "pos": 29.0, "length": 8.0},
+    {"id": "vol_up", "side": "left", "pos": 41.0, "length": 12.0},
+    {"id": "vol_down", "side": "left", "pos": 57.0, "length": 12.0}
+  ],
+  "ports": [
+    {"id": "usbc", "side": "bottom", "center": 0.0, "width": 13.0, "height": 7.0, "radius": 3.4},
+    {"id": "speaker_l", "side": "bottom", "center": -16.0, "width": 14.0, "height": 3.0, "radius": 1.4},
+    {"id": "speaker_r", "side": "bottom", "center": 16.0, "width": 14.0, "height": 3.0, "radius": 1.4}
+  ]
+}

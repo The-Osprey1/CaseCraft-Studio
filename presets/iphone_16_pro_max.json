@@ -1,0 +1,18 @@
+{
+  "id": "iphone_16_pro_max",
+  "name": "iPhone 16 Pro Max (approx - verify with calipers)",
+  "body": {"length": 163.0, "width": 77.6, "thickness": 8.25, "corner_radius": 12.0},
+  "camera": {"x": 4.0, "y": 4.0, "width": 38.0, "height": 39.5, "radius": 10.0},
+  "buttons": [
+    {"id": "power", "side": "right", "pos": 54.0, "length": 22.0},
+    {"id": "camera_control", "side": "right", "pos": 108.0, "length": 14.0},
+    {"id": "action", "side": "left", "pos": 31.0, "length": 8.0},
+    {"id": "vol_up", "side": "left", "pos": 44.0, "length": 12.0},
+    {"id": "vol_down", "side": "left", "pos": 60.0, "length": 12.0}
+  ],
+  "ports": [
+    {"id": "usbc", "side": "bottom", "center": 0.0, "width": 13.0, "height": 7.0, "radius": 3.4},
+    {"id": "speaker_l", "side": "bottom", "center": -18.0, "width": 14.0, "height": 3.0, "radius": 1.4},
+    {"id": "speaker_r", "side": "bottom", "center": 18.0, "width": 14.0, "height": 3.0, "radius": 1.4}
+  ]
+}

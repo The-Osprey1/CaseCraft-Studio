@@ -1,0 +1,15 @@
+{
+  "id": "oneplus_13",
+  "name": "OnePlus 13 (approx - verify with calipers)",
+  "body": {"length": 162.9, "width": 76.5, "thickness": 8.50, "corner_radius": 10.0},
+  "camera": {"x": 10.0, "y": 12.0, "width": 50.0, "height": 50.0, "radius": 24.5},
+  "buttons": [
+    {"id": "volume", "side": "right", "pos": 48.0, "length": 24.0},
+    {"id": "power", "side": "right", "pos": 80.0, "length": 14.0},
+    {"id": "alert_slider", "side": "left", "pos": 32.0, "length": 10.0}
+  ],
+  "ports": [
+    {"id": "usbc", "side": "bottom", "center": 0.0, "width": 13.0, "height": 7.0, "radius": 3.4},
+    {"id": "speaker", "side": "bottom", "center": 19.0, "width": 14.0, "height": 3.0, "radius": 1.4}
+  ]
+}

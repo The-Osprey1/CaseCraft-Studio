@@ -1,0 +1,14 @@
+{
+  "id": "pixel_9_pro",
+  "name": "Pixel 9 Pro (approx - verify with calipers)",
+  "body": {"length": 152.8, "width": 72.0, "thickness": 8.50, "corner_radius": 10.5},
+  "camera": {"x": 7.5, "y": 13.0, "width": 57.0, "height": 21.0, "radius": 10.0},
+  "buttons": [
+    {"id": "power", "side": "right", "pos": 48.0, "length": 12.0},
+    {"id": "volume", "side": "right", "pos": 68.0, "length": 26.0}
+  ],
+  "ports": [
+    {"id": "usbc", "side": "bottom", "center": 0.0, "width": 13.0, "height": 7.0, "radius": 3.4},
+    {"id": "speaker", "side": "bottom", "center": 18.0, "width": 14.0, "height": 3.0, "radius": 1.4}
+  ]
+}

@@ -1,5 +1,8 @@
 -r requirements.txt
 pytest>=8,<10
+# trimesh's 3MF reader (used by cli_test.py as an extra cross-check) needs lxml; it is an
+# optional trimesh dependency, so declare it explicitly for clean environments such as CI.
+lxml>=5,<7
 # 3MF Consortium reference library: independent strict-mode check of exported 3MF files.
 # Optional at runtime and in tests (skipped when absent); CI installs it.
 lib3mf==2.5.0

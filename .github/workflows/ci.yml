@@ -45,9 +45,10 @@ jobs:
       - name: Full B-rep / export test suite
         run: python -m pytest -m slow -q --junitxml=reports/slow.xml
       - name: CLI gate - modular set on the generic printer
-        run: python cli_test.py --preset iphone_16_pro --pattern voronoi --mode through --magsafe --out out/voronoi
+        # shared runners vary run to run; 4 s still flags a real 2-3x slow-down (local budget: 1.5 s)
+        run: python cli_test.py --preset iphone_16_pro --pattern voronoi --mode through --magsafe --perf-budget 4 --out out/voronoi
       - name: CLI gate - inlay + print-in-place on the H3C profile
-        run: python cli_test.py --preset iphone_15_pro --pattern hex --mode inlay --printer bambu_h3c --out out/h3c
+        run: python cli_test.py --preset iphone_15_pro --pattern hex --mode inlay --printer bambu_h3c --perf-budget 4 --out out/h3c
       - name: CLI gate - fit-test coupons
         run: |
           python cli_test.py --preset iphone_15_pro --coupon --out out/coupon_camera
@@ -63,6 +64,34 @@ jobs:
             reports/
             out/3mf_fixtures/
             out/h3c/PrintInPlace_Report.txt
+
+  windows-desktop:
+    name: Windows desktop app (PyInstaller + smoke test + installer)
+    runs-on: windows-latest
+    needs: python-fast
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: pip install -r requirements-dev.txt -r requirements-desktop.txt
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+      - name: Build, test, package and smoke-test
+        shell: pwsh
+        run: .\desktop\build.ps1 -Python python
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: casecraft-studio-windows
+          path: dist/CaseCraftStudio-Setup-*.exe
 
   frontend:
     name: Frontend build

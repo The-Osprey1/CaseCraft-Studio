@@ -32,7 +32,11 @@ import {
 } from "./constants.jsx";
 import usePreview from "./hooks/usePreview.js";
 import useExports from "./hooks/useExports.js";
-import { downloadBlob } from "./api.js";
+import useProject from "./hooks/useProject.js";
+import FileMenu from "./components/FileMenu.jsx";
+import FilePickButton from "./components/FilePickButton.jsx";
+import { apiFetch, downloadBlob, postJson } from "./api.js";
+import { IS_DESKTOP, call, confirmAction, saveTextFile } from "./desktop.js";
 
 const COUPON_TYPES = [
   { id: "camera", label: "Camera & Snap", desc: "Camera ring, backplate snap joint and nearest button" },
@@ -65,6 +69,10 @@ export default function App() {
 
   // Request status: preview requests live in usePreview; this is for load/export/import errors
   const [error, setError] = useState(null);
+  const [notice, setNotice] = useState(null); // {text, path?} -- success toast
+  const [userPresetIds, setUserPresetIds] = useState([]);
+  const [deviceName, setDeviceName] = useState(null); // "Save as my device" inline form (null = closed)
+  const defaultsRef = useRef({ presetId: null, printerId: "generic_256" });
   const delayRef = useRef(0); // debounce for the NEXT preview request (ms)
 
   const { preview, status, error: previewError, invalid, isCurrent, refresh } = usePreview(
@@ -85,33 +93,59 @@ export default function App() {
     printerId,
     canExport,
     onError: setError,
+    onSaved: (r) => setNotice({ text: `Saved ${r.name}`, path: r.path }),
   });
   const printer = useMemo(() => printers.find((p) => p.id === printerId), [printers, printerId]);
   const loading = status === "loading";
   const dirty = !isCurrent;
 
+  const loadPresets = useCallback(async () => {
+    const data = await (await apiFetch("/api/presets")).json();
+    setPresets(data.presets);
+    setUserPresetIds(data.user_ids || []);
+    if (data.skipped?.length) {
+      setError(
+        `Skipped ${data.skipped.length} damaged device file(s): ` +
+          data.skipped.map((s) => `${s.file} (${s.error})`).join("; ")
+      );
+    }
+    return data;
+  }, []);
+
   useEffect(() => {
     (async () => {
       try {
-        const [res, pres] = await Promise.all([fetch("/api/presets"), fetch("/api/printers")]);
-        if (!res.ok) throw new Error("Failed to load presets");
-        const data = await res.json();
-        setPresets(data.presets);
-        if (pres.ok) {
-          const pdata = await pres.json();
+        const [data, pdata] = await Promise.all([
+          loadPresets(),
+          apiFetch("/api/printers")
+            .then((r) => r.json())
+            .catch(() => null),
+        ]);
+        if (pdata) {
           setPrinters(pdata.printers);
           setPrinterId(pdata.default_id);
+          defaultsRef.current.printerId = pdata.default_id;
         }
+        defaultsRef.current.presetId = data.default_id;
         const initial = data.presets.find((p) => p.id === data.default_id) || data.presets[0];
         if (initial) {
           delayRef.current = 0;
           setConfig(structuredClone(initial));
+        } else {
+          setError("No device presets could be loaded. Reinstall CaseCraft Studio.");
         }
       } catch (err) {
-        setError(err.message);
+        setError(`Could not load devices: ${err.message}`);
       }
     })();
-  }, []);
+  }, [loadPresets]);
+
+  // auto-dismiss the success toast
+  useEffect(() => {
+    if (!notice) return undefined;
+    const t = setTimeout(() => setNotice(null), 8000);
+    return () => clearTimeout(t);
+  }, [notice]);
 
   const updateConfig = useCallback((updater, immediate = false) => {
     setConfig((prev) => {
@@ -140,34 +174,109 @@ export default function App() {
     replaceConfig(next);
   };
 
-  const handleExportPresetJson = () => {
-    if (!config) return;
-    downloadBlob(
-      new Blob([JSON.stringify(config, null, 2)], { type: "application/json" }),
-      `${config.id}_preset.json`
-    );
+  const saveText = async (name, text, mime) => {
+    const r = await saveTextFile(name, text, mime, downloadBlob);
+    if (r.ok && r.path) setNotice({ text: `Saved ${r.name}`, path: r.path });
+    else if (!r.ok && !r.cancelled) setError(r.error);
   };
 
-  const handleImportPresetJson = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        replaceConfig(JSON.parse(String(reader.result || "{}")));
-      } catch {
-        setError("Invalid preset JSON file.");
-      }
-    };
-    reader.readAsText(file);
+  const handleExportPresetJson = () => {
+    if (!config) return;
+    saveText(`${config.id}_preset.json`, JSON.stringify(config, null, 2), "application/json");
   };
+
+  const handleImportPresetJson = (text, fileName) => {
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      setError(`${fileName} is not valid JSON.`);
+      return;
+    }
+    if (data?.format === "casecraft-project") {
+      setError(`${fileName} is a project file; open it from the file menu instead.`);
+      return;
+    }
+    if (!data || typeof data !== "object" || !data.body || !data.id) {
+      setError(`${fileName} is not a CaseCraft device preset.`);
+      return;
+    }
+    replaceConfig(data); // the preview validates it and reports any problems as findings
+  };
+
+  // ---- user device library ("My devices")
+  const handleSaveDevice = async () => {
+    const name = (deviceName || "").trim();
+    if (!config || !name) return;
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 60);
+    const id = `my_${slug || "device"}`;
+    if (userPresetIds.includes(id) && !(await confirmAction(`Replace your saved device "${name}"?`))) return;
+    try {
+      const res = await postJson("/api/user-presets", { ...config, id, name });
+      const saved = await res.json();
+      await loadPresets();
+      setDeviceName(null);
+      replaceConfig(saved.preset);
+      setNotice({ text: `Saved "${name}" to My devices` });
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const handleDeleteDevice = async () => {
+    if (!config || !userPresetIds.includes(config.id)) return;
+    if (!(await confirmAction(`Delete "${config.name}" from My devices? The current design stays open.`))) return;
+    try {
+      await apiFetch(`/api/user-presets/${encodeURIComponent(config.id)}`, { method: "DELETE" });
+      await loadPresets();
+      setNotice({ text: `Deleted "${config.name}"` });
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  // ---- projects (desktop)
+  const applyProject = useCallback(
+    (data) => {
+      replaceConfig(structuredClone(data.config));
+      if (data.printerId) {
+        if (printers.some((p) => p.id === data.printerId)) setPrinterId(data.printerId);
+        else setError(`Printer profile "${data.printerId}" is not available; using ${printerId}.`);
+      }
+      if (typeof data.themeId === "string") setActiveThemeId(data.themeId);
+      if (data.colors && typeof data.colors === "object") setColors((c) => ({ ...c, ...data.colors }));
+      if (COUPON_TYPES.some((c) => c.id === data.couponType)) setCouponType(data.couponType);
+      if (typeof data.calId === "string") setActiveCalId(data.calId);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [printers, printerId]
+  );
+
+  const resetDesign = () => {
+    const initial = presets.find((p) => p.id === defaultsRef.current.presetId) || presets[0];
+    if (initial) replaceConfig(structuredClone(initial));
+    setPrinterId(defaultsRef.current.printerId);
+    setActiveThemeId(FILAMENT_THEMES[0].id);
+    setColors(FILAMENT_THEMES[0].colors);
+    setCouponType("camera");
+    setActiveCalId("h3c");
+  };
+
+  const project = useProject({
+    fields: { config, printerId, themeId: activeThemeId, colors, couponType, calId: activeCalId },
+    ready: Boolean(config && presets.length),
+    applyProject,
+    resetDesign,
+    onError: setError,
+    onNotice: setNotice,
+  });
 
   const handleExportZip = (coupon = false) => exportZip(coupon, couponType);
   const handleExportPart = exportPart;
 
   const handleDownloadLaserSvg = () => {
     if (!preview?.laser_svg || !config || !isCurrent) return;
-    downloadBlob(new Blob([preview.laser_svg], { type: "image/svg+xml" }), `${config.id}_Laser_Backplate.svg`);
+    saveText(`${config.id}_Laser_Backplate.svg`, preview.laser_svg, "image/svg+xml");
   };
 
   const setCameraOpening = (key, value) =>
@@ -201,6 +310,7 @@ export default function App() {
                 </span>
               )}
               {config && <DeviceBadge verification={config.verification} />}
+              <FileMenu project={project} onNotice={setNotice} onError={setError} />
             </div>
             <p className="hidden xl:block text-[11px] text-slate-400">
               Modular 4-Part Snap-Fit CAD Generator
@@ -397,6 +507,11 @@ export default function App() {
                                     {p.body.length} × {p.body.width} × {p.body.thickness} mm
                                   </div>
                                   <DeviceBadge verification={p.verification} className="mt-1.5 inline-block" />
+                                  {userPresetIds.includes(p.id) && (
+                                    <span className="ml-1.5 mt-1.5 inline-block rounded-full border border-violet-400/30 bg-violet-400/10 px-1.5 py-0.5 text-[10px] font-medium text-violet-300">
+                                      My device
+                                    </span>
+                                  )}
                                 </div>
                               </button>
                             );
@@ -437,7 +552,7 @@ export default function App() {
                             Customize the snap-in rigid backplate pattern or laser-cut outline.
                           </p>
                         </div>
-                        {<PatternControls config={config} updateConfig={updateConfig} uiMode={uiMode} />}
+                        {<PatternControls config={config} updateConfig={updateConfig} uiMode={uiMode} onError={setError} />}
                       </div>
                     )}
 
@@ -802,15 +917,15 @@ export default function App() {
                               Base Device Preset
                             </label>
                             <div className="flex items-center gap-1.5">
-                              <label className="cursor-pointer rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-[11px] text-slate-300 hover:border-cyan-500">
+                              <FilePickButton
+                                accept=".json,application/json"
+                                extensions={[".json"]}
+                                onText={handleImportPresetJson}
+                                onError={setError}
+                                className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-[11px] text-slate-300 hover:border-cyan-500"
+                              >
                                 Import JSON
-                                <input
-                                  type="file"
-                                  accept=".json,application/json"
-                                  onChange={handleImportPresetJson}
-                                  className="hidden"
-                                />
-                              </label>
+                              </FilePickButton>
                               <button
                                 type="button"
                                 onClick={handleExportPresetJson}
@@ -825,12 +940,86 @@ export default function App() {
                             onChange={(e) => handleSelectPreset(e.target.value)}
                             className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs font-medium text-slate-100 outline-none focus:border-cyan-500"
                           >
-                            {presets.map((p) => (
-                              <option key={p.id} value={p.id}>
-                                {cleanDeviceName(p.name)}
-                              </option>
-                            ))}
+                            {!presets.some((p) => p.id === config.id) && (
+                              <option value={config.id}>{cleanDeviceName(config.name)} (unsaved)</option>
+                            )}
+                            <optgroup label="Built-in devices">
+                              {presets
+                                .filter((p) => !userPresetIds.includes(p.id))
+                                .map((p) => (
+                                  <option key={p.id} value={p.id}>
+                                    {cleanDeviceName(p.name)}
+                                  </option>
+                                ))}
+                            </optgroup>
+                            {userPresetIds.length > 0 && (
+                              <optgroup label="My devices">
+                                {presets
+                                  .filter((p) => userPresetIds.includes(p.id))
+                                  .map((p) => (
+                                    <option key={p.id} value={p.id}>
+                                      {p.name}
+                                    </option>
+                                  ))}
+                              </optgroup>
+                            )}
                           </select>
+                          {deviceName === null ? (
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setDeviceName(
+                                    userPresetIds.includes(config.id) ? config.name : `My ${cleanDeviceName(config.name)}`
+                                  )
+                                }
+                                className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-[11px] text-violet-300 hover:border-violet-400"
+                              >
+                                Save as my device…
+                              </button>
+                              {userPresetIds.includes(config.id) && (
+                                <button
+                                  type="button"
+                                  onClick={handleDeleteDevice}
+                                  className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-[11px] text-rose-300 hover:border-rose-400"
+                                >
+                                  Delete my device
+                                </button>
+                              )}
+                            </div>
+                          ) : (
+                            <form
+                              className="flex items-center gap-1.5"
+                              onSubmit={(e) => {
+                                e.preventDefault();
+                                handleSaveDevice();
+                              }}
+                            >
+                              <input
+                                autoFocus
+                                value={deviceName}
+                                maxLength={80}
+                                onChange={(e) => setDeviceName(e.target.value)}
+                                onKeyDown={(e) => e.key === "Escape" && setDeviceName(null)}
+                                placeholder="Device name"
+                                className="min-w-0 flex-1 rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[11px] text-slate-100 outline-none focus:border-violet-400"
+                              />
+                              <button
+                                type="submit"
+                                disabled={!deviceName.trim()}
+                                className="rounded bg-violet-500 px-2 py-1 text-[11px] font-semibold text-white disabled:opacity-50"
+                              >
+                                Save
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setDeviceName(null)}
+                                className="rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-300"
+                              >
+                                Cancel
+                              </button>
+                            </form>
+                          )}
                         </div>
 
                         <section className="space-y-2.5">
@@ -1346,7 +1535,7 @@ export default function App() {
                     )}
 
                     {/* PRO TAB 3: PATTERN */}
-                    {proTab === "pattern" && <PatternControls config={config} updateConfig={updateConfig} uiMode={uiMode} />}
+                    {proTab === "pattern" && <PatternControls config={config} updateConfig={updateConfig} uiMode={uiMode} onError={setError} />}
 
                     {/* PRO TAB 4: COLORS */}
                     {proTab === "colors" && (
@@ -1501,12 +1690,73 @@ export default function App() {
           </div>
 
           {/* Error Toast Banner */}
-          {(error || previewError) && (
-            <div className="absolute top-20 right-3 z-20 max-w-md rounded-xl border border-rose-500/40 bg-rose-950/90 px-3.5 py-2 text-xs text-rose-200 shadow-xl backdrop-blur">
-              <strong className="font-semibold">Validation / CAD Error: </strong>
-              {error || previewError}
-            </div>
-          )}
+          <div className="absolute top-20 right-3 z-20 flex max-w-md flex-col items-end gap-2">
+            {project.restoreOffer && (
+              <div className="rounded-xl border border-amber-500/40 bg-amber-950/90 px-3.5 py-2.5 text-xs text-amber-100 shadow-xl backdrop-blur">
+                <div className="font-semibold">Restore your unsaved design?</div>
+                <div className="mt-0.5 text-amber-200/80">
+                  CaseCraft Studio closed before it was saved
+                  {project.restoreOffer.savedAt ? ` (autosaved ${project.restoreOffer.savedAt.replace("T", " ")})` : ""}.
+                </div>
+                <div className="mt-2 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={project.restore}
+                    className="rounded-lg bg-amber-400 px-2.5 py-1 font-semibold text-slate-950 hover:bg-amber-300"
+                  >
+                    Restore
+                  </button>
+                  <button
+                    type="button"
+                    onClick={project.discardRestore}
+                    className="rounded-lg border border-amber-500/40 px-2.5 py-1 text-amber-200 hover:bg-amber-500/10"
+                  >
+                    Discard
+                  </button>
+                </div>
+              </div>
+            )}
+            {(error || previewError) && (
+              <div className="flex items-start gap-2 rounded-xl border border-rose-500/40 bg-rose-950/90 px-3.5 py-2 text-xs text-rose-200 shadow-xl backdrop-blur">
+                <div className="min-w-0 break-words">
+                  <strong className="font-semibold">{error ? "Error: " : "Validation / CAD Error: "}</strong>
+                  {error || previewError}
+                </div>
+                {error && (
+                  <button
+                    type="button"
+                    aria-label="Dismiss"
+                    onClick={() => setError(null)}
+                    className="-mr-1 shrink-0 rounded px-1 text-rose-300 hover:bg-rose-500/20"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+            )}
+            {notice && (
+              <div className="flex items-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-950/90 px-3.5 py-2 text-xs text-emerald-100 shadow-xl backdrop-blur">
+                <span className="min-w-0 break-words">{notice.text}</span>
+                {notice.path && IS_DESKTOP && (
+                  <button
+                    type="button"
+                    onClick={() => call("reveal", notice.path)}
+                    className="shrink-0 rounded-lg border border-emerald-500/40 px-2 py-0.5 text-emerald-200 hover:bg-emerald-500/10"
+                  >
+                    Show in folder
+                  </button>
+                )}
+                <button
+                  type="button"
+                  aria-label="Dismiss"
+                  onClick={() => setNotice(null)}
+                  className="shrink-0 rounded px-1 text-emerald-300 hover:bg-emerald-500/20"
+                >
+                  ×
+                </button>
+              </div>
+            )}
+          </div>
 
           {viewMode === "svg" ? (
             <div className="flex h-full w-full flex-col items-center justify-center bg-slate-950 p-8 pt-20">

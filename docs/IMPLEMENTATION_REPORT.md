@@ -96,7 +96,36 @@ The environment used for all baseline and final runs:
   - fast tests
   - slow geometry and export tests, CLI gates and fixtures, with artifacts uploaded
   - the frontend build
-- **Dependencies:** constrained ranges in `requirements.txt`; `requirements-dev.txt` adds pytest and lib3mf.
+- **Dependencies:** constrained ranges in `requirements.txt`; `requirements-dev.txt` adds pytest, lib3mf and lxml (needed by trimesh's 3MF reader in `cli_test.py`).
+
+### Milestone E: Windows desktop app (v1.1.0)
+- **Packaging:** a PyInstaller one-folder build (`desktop/casecraft.spec`, 475 MB unpacked), wrapped in a per-user Inno Setup installer (`desktop/installer.iss`, about 133 MB). The installer needs no admin rights. It adds a Start-menu entry and an uninstaller, and optionally associates `.casecraft` files. It checks for WebView2, and the uninstaller asks before deleting user data. `desktop/build.ps1` runs these steps and stops at the first failure:
+  1. frontend build
+  2. fast tests
+  3. PyInstaller
+  4. frozen smoke test
+  5. installer
+- **Shell (`desktop/app.py`):**
+  - a pywebview (Edge WebView2) window
+  - a start-up self-check
+  - a single-instance mutex, plus an authenticated localhost hand-off that brings the window forward and forwards the project to open
+  - a WebView2-missing check
+  - the CAD server on a free port, with a per-launch token and a watchdog restart
+  - rotating logs and global exception hooks
+  - window geometry kept on a monitor that exists
+- **Bridge (`desktop/desktop_bridge.py`):** native Save, Open and confirm dialogs. Exports stream straight to a temp file and are then moved into place. Writes are only allowed to paths the user picked in this session. It also provides projects, the recent list, autosave and restore, and diagnostics.
+- **Server:**
+  - `appdirs` resource and user paths, so the server works when frozen
+  - a bad preset file is skipped, not fatal
+  - a user device library (`/api/user-presets`) with id and traversal checks
+  - a token middleware, used in desktop mode only
+  - a 10 MB request cap
+  - a byte-capped export cache
+  - error ids on 500s
+- **Bugs found by the new tests and manual checks:**
+  - `Preset.from_dict([])` silently built a default "Custom" phone; it now raises `ParamError`.
+  - The window opened off-screen on first launch under 188 % display scaling, because pywebview's `CenterScreen` is wrong under DPI scaling. The position is now always explicit and checked against the monitors.
+  - Confirm dialogs read "127.0.0.1 says"; they are now native.
 
 ## B. File-level change summary
 
@@ -157,8 +186,11 @@ The manual UI check confirmed:
 
 **Failing tests:** none. **Skipped:** none.
 
+**GitHub Actions** (2026-11-18, `ubuntu-latest`, Python 3.12, Node 22):
+- The first run, on `fc31f1c`, failed in the H3C CLI gate. `cli_test.py` loads `Backplate_Multicolor.3mf` with trimesh, whose 3MF reader needs `lxml`. That package was present locally only as a dependency of an unrelated package, and was not declared.
+- `eec46cb` declares `lxml` in `requirements-dev.txt`. Its push and pull-request runs pass all three jobs: fast tests, the slow geometry/export job (including the coupon gates and the 3MF reference fixtures) and the frontend build.
+
 **Not executed:**
-- the GitHub Actions workflow (no remote run was made)
 - any slicer import
 - any physical print
 
@@ -179,7 +211,7 @@ The manual UI check confirmed:
 - **H3C dimensions** come from secondary sources (the manufacturer page returned 403).
 - **Camera envelope** supports one rounded-rectangle base and one outer opening, with a ruled loft only. It does not model the bump height or multiple islands.
 - **Text patterns on Linux CI** depend on system fonts. Arial is substituted, via `fonts-liberation`, which can shift text metrics slightly from Windows.
-- **The CI workflow has not been run.** It was written and its YAML parsed locally; no GitHub Actions run has happened yet.
+- **CI covers one platform.** GitHub Actions runs on Ubuntu with Python 3.12 only. Windows is checked only by the local runs above. The workflow's actions (`checkout@v4`, `setup-python@v5`, `setup-node@v4`, `upload-artifact@v4`) target the deprecated Node.js 20 runtime and should be upgraded.
 - **Server CAD is serialized** by a single lock. Abandoned preview requests are now skipped, but a single slow request still blocks others.
 - **The frontend bundle** is still 1.1 MB, a pre-existing Vite warning.
 

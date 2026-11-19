@@ -6,35 +6,52 @@ import dataclasses
 import hashlib
 import io
 import json
+import logging
+import os
+import re
+import secrets
 import sys
 import tempfile
 import threading
-import time
+import uuid
 import zipfile
 from collections import OrderedDict
 from pathlib import Path
 
-from build123d import Compound, Pos
+from build123d import Pos
 import anyio
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-BASE_DIR = Path(__file__).resolve().parent
-if str(BASE_DIR) not in sys.path:
-    sys.path.insert(0, str(BASE_DIR))
+_SRC_DIR = Path(__file__).resolve().parent
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
 
+import appdirs
 import bambu_3mf
 import cad_engine as ce
 import dfm
 import print_in_place
 from params import ParamError, Preset
 from printers import DEFAULT_PRINTER, PRINTERS, PrinterProfile, get_printer
+from version import __version__
 
+log = logging.getLogger("casecraft")
+
+BASE_DIR = appdirs.resource_dir()
 PRESETS_DIR = BASE_DIR / "presets"
 SCHEMA_PATH = BASE_DIR / "schema" / "phone_preset.schema.json"
 WEB_DIST_DIR = BASE_DIR / "web" / "dist"
+
+# Desktop mode: the launcher sets a per-launch random token; every API call must carry it, so
+# other local processes or web pages cannot drive the CAD server. Unset = plain browser/dev mode.
+ACCESS_TOKEN = os.environ.get("CASECRAFT_TOKEN") or None
+MAX_BODY_BYTES = 10 * 1024 * 1024          # SVG patterns travel inside the JSON payload
+_ZIP_CACHE_MAX_BYTES = 256 * 1024 * 1024
+_PRESET_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,63}$")
 
 _CACHE_MAX = 16
 _preview_cache: OrderedDict[str, dict] = OrderedDict()
@@ -291,12 +308,20 @@ def _build_export_zip(p: Preset, coupon: bool, pr: PrinterProfile, coupon_type: 
         return buf.getvalue(), filename
 
 
+def _server_error(prefix: str, exc: BaseException) -> HTTPException:
+    """Log the full traceback under a short id the user can quote, and return a 500 whose
+    message is readable on its own."""
+    error_id = uuid.uuid4().hex[:8]
+    log.error("%s [error id %s]", prefix, error_id, exc_info=(type(exc), exc, exc.__traceback__))
+    return HTTPException(status_code=500, detail=f"{prefix}: {exc} (error id {error_id}; details in the log)")
+
+
 router = APIRouter()
 
 
 @router.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "version": __version__}
 
 
 @router.get("/printers")
@@ -304,17 +329,76 @@ def get_printers():
     return {"printers": [pr.to_dict() for pr in PRINTERS.values()], "default_id": DEFAULT_PRINTER}
 
 
+def _load_preset_dir(directory: Path, skipped: list[dict]) -> list[dict]:
+    """Load every preset in `directory`. A broken file is skipped and reported, never fatal:
+    one bad file must not take the whole device list (and the app) down with it."""
+    out = []
+    if not directory.is_dir():
+        return out
+    for path in sorted(directory.glob("*.json")):
+        try:
+            out.append(dataclasses.asdict(Preset.load(path)))
+        except Exception as exc:  # noqa: BLE001 -- any parse/validation failure skips the file
+            log.warning("Skipping preset %s: %s", path, exc)
+            skipped.append({"file": path.name, "error": str(exc)})
+    return out
+
+
+def _builtin_ids() -> set[str]:
+    return {p.stem for p in PRESETS_DIR.glob("*.json")}
+
+
 @router.get("/presets")
 def get_presets():
-    presets = []
-    for path in sorted(PRESETS_DIR.glob("*.json")):
-        presets.append(dataclasses.asdict(Preset.load(path)))
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8")) if SCHEMA_PATH.exists() else {}
+    skipped: list[dict] = []
+    builtin = _load_preset_dir(PRESETS_DIR, skipped)
+    builtin_ids = {p["id"] for p in builtin}
+    user = [p for p in _load_preset_dir(appdirs.user_presets_dir(), skipped) if p["id"] not in builtin_ids]
+    try:
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8")) if SCHEMA_PATH.exists() else {}
+    except (OSError, ValueError) as exc:
+        log.warning("Preset schema unreadable: %s", exc)
+        schema = {}
+    default_id = "iphone_15_pro" if "iphone_15_pro" in builtin_ids else (builtin[0]["id"] if builtin else None)
     return {
-        "presets": presets,
-        "default_id": "iphone_15_pro",
+        "presets": builtin + user,
+        "user_ids": [p["id"] for p in user],
+        "skipped": skipped,
+        "default_id": default_id,
         "schema": schema,
     }
+
+
+@router.post("/user-presets")
+def save_user_preset(payload: dict):
+    """Save (or update) a preset in the per-user library. Built-in ids are reserved."""
+    p = _preset_from_payload(payload)
+    if not _PRESET_ID_RE.match(p.id):
+        raise HTTPException(status_code=422,
+                            detail="Preset id must be 1-64 lowercase letters, digits or underscores")
+    if p.id in _builtin_ids():
+        raise HTTPException(status_code=409,
+                            detail=f"'{p.id}' is a built-in device; choose a different name for your copy")
+    target = appdirs.user_presets_dir() / f"{p.id}.json"
+    try:
+        appdirs.atomic_write_text(target, json.dumps(dataclasses.asdict(p), indent=2))
+    except OSError as exc:
+        raise _server_error("Could not save the preset", exc) from exc
+    return {"saved": p.id, "preset": dataclasses.asdict(p)}
+
+
+@router.delete("/user-presets/{preset_id}")
+def delete_user_preset(preset_id: str):
+    if not _PRESET_ID_RE.match(preset_id):
+        raise HTTPException(status_code=422, detail="Invalid preset id")
+    target = appdirs.user_presets_dir() / f"{preset_id}.json"
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail=f"No saved device '{preset_id}'")
+    try:
+        target.unlink()
+    except OSError as exc:
+        raise _server_error("Could not delete the preset", exc) from exc
+    return {"deleted": preset_id}
 
 
 def _cad_unless_abandoned(request: Request, fn):
@@ -348,7 +432,7 @@ async def generate_preview(request: Request, payload: dict, printer: str = Query
     except ParamError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"CAD generation error: {exc}") from exc
+        raise _server_error("CAD generation error", exc) from exc
 
     with _cache_lock:
         _preview_cache[key] = result
@@ -380,12 +464,13 @@ def export_zip(payload: dict, coupon: bool = Query(default=False),
     except ParamError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Export failed: {exc}") from exc
+        raise _server_error("Export failed", exc) from exc
 
     with _cache_lock:
         _zip_cache[key] = (data, filename)
         _zip_cache.move_to_end(key)
-        while len(_zip_cache) > _CACHE_MAX:
+        while len(_zip_cache) > 1 and (len(_zip_cache) > _CACHE_MAX or
+                                       sum(len(d) for d, _ in _zip_cache.values()) > _ZIP_CACHE_MAX_BYTES):
             _zip_cache.popitem(last=False)
 
     return Response(
@@ -451,7 +536,7 @@ def export_part(payload: dict, part: str = Query(...), printer: str = Query(defa
     except ParamError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Part export failed: {exc}") from exc
+        raise _server_error("Part export failed", exc) from exc
     return Response(
         content=data,
         media_type=media_type,
@@ -459,13 +544,49 @@ def export_part(payload: dict, part: str = Query(...), printer: str = Query(defa
     )
 
 
-app = FastAPI(title="CaseCraft Studio API", version="1.0.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="CaseCraft Studio API", version=__version__)
+
+# Paths served by the API router (at "/" and under "/api"); everything else is the static UI.
+_API_SEGMENTS = {r.path.strip("/").split("/")[0] for r in router.routes} | {"api"}
+_OPEN_SEGMENTS = {"health"}     # startup polling; reveals nothing
+
+
+def _api_segment(path: str) -> str | None:
+    parts = [s for s in path.split("/") if s]
+    if not parts or parts[0] not in _API_SEGMENTS:
+        return None
+    return parts[1] if parts[0] == "api" and len(parts) > 1 else parts[0]
+
+
+@app.middleware("http")
+async def _guard(request: Request, call_next):
+    seg = _api_segment(request.url.path)
+    if seg is not None:
+        if ACCESS_TOKEN and seg not in _OPEN_SEGMENTS:
+            supplied = request.headers.get("x-casecraft-token") or request.query_params.get("token") or ""
+            if not secrets.compare_digest(supplied, ACCESS_TOKEN):
+                return JSONResponse({"detail": "Not authorised"}, status_code=403)
+        length = request.headers.get("content-length")
+        if length and length.isdigit() and int(length) > MAX_BODY_BYTES:
+            return JSONResponse({"detail": f"Request too large (limit {MAX_BODY_BYTES // (1024 * 1024)} MB). "
+                                           "Use a smaller SVG pattern."}, status_code=413)
+    return await call_next(request)
+
+
+@app.exception_handler(Exception)
+async def _unhandled(request: Request, exc: Exception):
+    err = _server_error(f"Unexpected error in {request.method} {request.url.path}", exc)
+    return JSONResponse({"detail": err.detail}, status_code=500)
+
+
+if not ACCESS_TOKEN:
+    # Browser/dev mode only (Vite dev server on another port). The desktop app is same-origin.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 app.include_router(router)
 app.include_router(router, prefix="/api")
 

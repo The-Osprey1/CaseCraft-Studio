@@ -5,3 +5,7 @@ __pycache__/
 web/node_modules/
 web/dist/
 .pytest_cache/
+build/
+dist/
+desktop/build/
+*.casecraft

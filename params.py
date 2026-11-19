@@ -200,6 +200,8 @@ class Preset:
     # ---- construction -------------------------------------------------
     @classmethod
     def from_dict(cls, d: dict) -> "Preset":
+        if not isinstance(d, dict):
+            raise ParamError(f"Preset: expected a JSON object, got {type(d).__name__}")
         d = dict(d)
         p = cls(
             id=d.pop("id", "custom"),
@@ -223,7 +225,8 @@ class Preset:
     def load(cls, path_or_id: str | Path) -> "Preset":
         path = Path(path_or_id)
         if not path.exists():
-            path = Path(__file__).parent / "presets" / f"{path_or_id}.json"
+            import appdirs   # local import: params stays importable on its own
+            path = appdirs.resource_dir() / "presets" / f"{path_or_id}.json"
         return cls.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
     # ---- derived dims -------------------------------------------------

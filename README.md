@@ -91,6 +91,45 @@ Open `http://127.0.0.1:8000`.
 
 ---
 
+## Desktop App (Windows)
+
+`CaseCraftStudio-Setup-<version>.exe` installs CaseCraft Studio as a normal Windows app. It is a per-user install, so it needs no administrator rights. You get a Start-menu entry, an uninstaller and, optionally, `.casecraft` file association. The app opens in its own window using the Microsoft Edge WebView2 runtime, which ships with Windows 11. The CAD engine runs inside the app on a private localhost port, protected by a random per-launch token.
+
+**What the desktop app adds:**
+- **Native Save / Open dialogs.** Every export (ZIP, 3MF, STL, SVG, preset JSON) goes to the file you choose, via a temp file that is then moved into place. Exports end with *Show in folder*.
+- **Projects (`.casecraft`).** These save the design, printer, colours and coupon type. The file menu next to the device name offers *New*, *Open*, *Save*, *Save as* and a *Recent* list, with shortcuts `Ctrl+N`, `Ctrl+O`, `Ctrl+S` and `Ctrl+Shift+S`. The window title shows unsaved changes, and closing asks first.
+- **Autosave and crash recovery.** Unsaved changes are autosaved two seconds after the last edit. After a crash, the next start offers to restore them.
+- **My devices.** In Pro mode, use *Save as my device…* to keep your own measured phones beside the built-in presets. They are stored per user and survive updates and reinstalls.
+- **Reliability:**
+  - a start-up self-check
+  - a single running instance, so a second launch or a double-clicked project goes to the open window
+  - automatic restart of the CAD engine if it stops
+  - a recoverable error screen instead of a blank window
+  - rotating logs
+  - *Copy diagnostics* in the file menu
+
+| What | Where |
+|---|---|
+| Program | `%LOCALAPPDATA%\Programs\CaseCraft Studio` |
+| Settings, saved devices, autosave | `%APPDATA%\CaseCraft Studio` |
+| Logs | `%LOCALAPPDATA%\CaseCraft Studio\logs` |
+
+### Building the installer
+You need Python 3.12 with `requirements-desktop.txt` installed, Node 20 or newer, and [Inno Setup 6](https://jrsoftware.org/isinfo.php) (`winget install JRSoftware.InnoSetup`). Then run:
+```powershell
+powershell -ExecutionPolicy Bypass -File desktop\build.ps1
+```
+The script runs these steps and stops at the first failure:
+1. Builds the frontend.
+2. Runs the fast tests.
+3. Runs PyInstaller (`desktop/casecraft.spec`, which produces `dist/CaseCraftStudio/`).
+4. Runs `desktop/smoke_test.py` against the built exe. It starts the packaged CAD server headless, then checks the presets, the token, two previews and a full export.
+5. Runs Inno Setup (`desktop/installer.iss`, which produces `dist/CaseCraftStudio-Setup-<version>.exe`).
+
+The version lives in `version.py`. To run the desktop shell from source, use `python desktop/app.py`, or add `--debug` for WebView developer tools.
+
+---
+
 ## Verification & Tests
 
 ```bash
@@ -125,7 +164,11 @@ casecraft/
 ├── print_in_place.py      # co-printed part relationships + directional gap probes (experimental)
 ├── dfm.py                 # overhang/bridge DFM analyzer on Z-up print meshes
 ├── safe_ops.py            # clamped fillet/chamfer guards for OpenCascade stability
-├── server.py              # FastAPI API (/presets, /printers, /generate-preview, /export-zip, /export-part)
+├── server.py              # FastAPI API (/presets, /user-presets, /printers, /generate-preview, /export-zip, /export-part)
+├── appdirs.py             # bundled-resource vs per-user paths (works frozen), atomic writes
+├── projects.py            # .casecraft project files + recent list
+├── version.py             # single version number
+├── desktop/               # Windows app: launcher, JS bridge, PyInstaller spec, installer, build + smoke test
 ├── cli_test.py            # headless CAD + export verification gate
 ├── test_*.py              # pytest suites (fast + slow)
 ├── presets/               # 10 JSON phone presets (approximate)

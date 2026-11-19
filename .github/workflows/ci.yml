@@ -64,6 +64,34 @@ jobs:
             out/3mf_fixtures/
             out/h3c/PrintInPlace_Report.txt
 
+  windows-desktop:
+    name: Windows desktop app (PyInstaller + smoke test + installer)
+    runs-on: windows-latest
+    needs: python-fast
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: pip install -r requirements-dev.txt -r requirements-desktop.txt
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+      - name: Build, test, package and smoke-test
+        shell: pwsh
+        run: .\desktop\build.ps1 -Python python
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: casecraft-studio-windows
+          path: dist/CaseCraftStudio-Setup-*.exe
+
   frontend:
     name: Frontend build
     runs-on: ubuntu-latest

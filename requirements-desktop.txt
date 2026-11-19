@@ -1,0 +1,5 @@
+# Desktop app (Windows): native window + packaging. Tested: pywebview 6.2.1, PyInstaller 6.22.3.
+-r requirements.txt
+pywebview>=6.2,<7
+pyinstaller>=6.22,<7
+pillow>=10        # desktop/make_icon.py only

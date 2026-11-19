@@ -2,10 +2,11 @@ import React from "react";
 import { Upload } from "lucide-react";
 import { FINISH_MODES, PATTERN_CARDS, SAMPLE_SVGS } from "../constants.jsx";
 import { SliderField } from "./Fields.jsx";
+import FilePickButton from "./FilePickButton.jsx";
 
 // Pattern type cards, finish mode, per-pattern parameters and the MagSafe pocket toggle.
 // Moved from App.jsx (renderPatternControls); behaviour unchanged.
-export default function PatternControls({ config, updateConfig, uiMode }) {
+export default function PatternControls({ config, updateConfig, uiMode, onError }) {
   const handleSelectPatternType = (ptype) => {
     updateConfig((c) => {
       c.pattern.type = ptype;
@@ -44,22 +45,20 @@ export default function PatternControls({ config, updateConfig, uiMode }) {
     }, true);
   };
 
-  const handleSvgUpload = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      updateConfig((c) => {
-        c.pattern.type = "svg";
-        c.pattern.params = {
-          ...c.pattern.params,
-          svg: String(reader.result || ""),
-          size: c.pattern.params?.size ?? 0.65,
-        };
-        return c;
-      }, true);
-    };
-    reader.readAsText(file);
+  const handleSvgUpload = (text, fileName) => {
+    if (!/<svg[\s>]/i.test(text)) {
+      onError?.(`${fileName} does not look like an SVG drawing.`);
+      return;
+    }
+    updateConfig((c) => {
+      c.pattern.type = "svg";
+      c.pattern.params = {
+        ...c.pattern.params,
+        svg: text,
+        size: c.pattern.params?.size ?? 0.65,
+      };
+      return c;
+    }, true);
   };
 
     if (!config) return null;
@@ -323,16 +322,16 @@ export default function PatternControls({ config, updateConfig, uiMode }) {
 
             {config.pattern.type === "svg" && (
               <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3.5">
-                <label className="flex cursor-pointer items-center justify-center gap-2 rounded-lg border border-dashed border-cyan-500/50 bg-cyan-500/5 px-3 py-2.5 text-xs font-medium text-cyan-300 hover:bg-cyan-500/10 transition">
+                <FilePickButton
+                  accept=".svg,image/svg+xml"
+                  extensions={[".svg"]}
+                  onText={handleSvgUpload}
+                  onError={onError}
+                  className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-cyan-500/50 bg-cyan-500/5 px-3 py-2.5 text-xs font-medium text-cyan-300 hover:bg-cyan-500/10 transition"
+                >
                   <Upload className="h-3.5 w-3.5" />
                   Upload Custom .SVG Artwork
-                  <input
-                    type="file"
-                    accept=".svg,image/svg+xml"
-                    onChange={handleSvgUpload}
-                    className="hidden"
-                  />
-                </label>
+                </FilePickButton>
 
                 <div className="space-y-1.5">
                   <span className="text-[11px] text-slate-400">

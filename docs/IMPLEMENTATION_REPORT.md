@@ -98,6 +98,35 @@ The environment used for all baseline and final runs:
   - the frontend build
 - **Dependencies:** constrained ranges in `requirements.txt`; `requirements-dev.txt` adds pytest, lib3mf and lxml (needed by trimesh's 3MF reader in `cli_test.py`).
 
+### Milestone E: Windows desktop app (v1.1.0)
+- **Packaging:** a PyInstaller one-folder build (`desktop/casecraft.spec`, 475 MB unpacked), wrapped in a per-user Inno Setup installer (`desktop/installer.iss`, about 133 MB). The installer needs no admin rights. It adds a Start-menu entry and an uninstaller, and optionally associates `.casecraft` files. It checks for WebView2, and the uninstaller asks before deleting user data. `desktop/build.ps1` runs these steps and stops at the first failure:
+  1. frontend build
+  2. fast tests
+  3. PyInstaller
+  4. frozen smoke test
+  5. installer
+- **Shell (`desktop/app.py`):**
+  - a pywebview (Edge WebView2) window
+  - a start-up self-check
+  - a single-instance mutex, plus an authenticated localhost hand-off that brings the window forward and forwards the project to open
+  - a WebView2-missing check
+  - the CAD server on a free port, with a per-launch token and a watchdog restart
+  - rotating logs and global exception hooks
+  - window geometry kept on a monitor that exists
+- **Bridge (`desktop/desktop_bridge.py`):** native Save, Open and confirm dialogs. Exports stream straight to a temp file and are then moved into place. Writes are only allowed to paths the user picked in this session. It also provides projects, the recent list, autosave and restore, and diagnostics.
+- **Server:**
+  - `appdirs` resource and user paths, so the server works when frozen
+  - a bad preset file is skipped, not fatal
+  - a user device library (`/api/user-presets`) with id and traversal checks
+  - a token middleware, used in desktop mode only
+  - a 10 MB request cap
+  - a byte-capped export cache
+  - error ids on 500s
+- **Bugs found by the new tests and manual checks:**
+  - `Preset.from_dict([])` silently built a default "Custom" phone; it now raises `ParamError`.
+  - The window opened off-screen on first launch under 188 % display scaling, because pywebview's `CenterScreen` is wrong under DPI scaling. The position is now always explicit and checked against the monitors.
+  - Confirm dialogs read "127.0.0.1 says"; they are now native.
+
 ## B. File-level change summary
 
 **Modified:**

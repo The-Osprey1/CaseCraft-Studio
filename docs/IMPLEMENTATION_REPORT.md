@@ -96,7 +96,7 @@ The environment used for all baseline and final runs:
   - fast tests
   - slow geometry and export tests, CLI gates and fixtures, with artifacts uploaded
   - the frontend build
-- **Dependencies:** constrained ranges in `requirements.txt`; `requirements-dev.txt` adds pytest and lib3mf.
+- **Dependencies:** constrained ranges in `requirements.txt`; `requirements-dev.txt` adds pytest, lib3mf and lxml (needed by trimesh's 3MF reader in `cli_test.py`).
 
 ## B. File-level change summary
 
@@ -157,8 +157,11 @@ The manual UI check confirmed:
 
 **Failing tests:** none. **Skipped:** none.
 
+**GitHub Actions** (2026-11-18, `ubuntu-latest`, Python 3.12, Node 22):
+- The first run, on `fc31f1c`, failed in the H3C CLI gate. `cli_test.py` loads `Backplate_Multicolor.3mf` with trimesh, whose 3MF reader needs `lxml`. That package was present locally only as a dependency of an unrelated package, and was not declared.
+- `eec46cb` declares `lxml` in `requirements-dev.txt`. Its push and pull-request runs pass all three jobs: fast tests, the slow geometry/export job (including the coupon gates and the 3MF reference fixtures) and the frontend build.
+
 **Not executed:**
-- the GitHub Actions workflow (no remote run was made)
 - any slicer import
 - any physical print
 
@@ -179,7 +182,7 @@ The manual UI check confirmed:
 - **H3C dimensions** come from secondary sources (the manufacturer page returned 403).
 - **Camera envelope** supports one rounded-rectangle base and one outer opening, with a ruled loft only. It does not model the bump height or multiple islands.
 - **Text patterns on Linux CI** depend on system fonts. Arial is substituted, via `fonts-liberation`, which can shift text metrics slightly from Windows.
-- **The CI workflow has not been run.** It was written and its YAML parsed locally; no GitHub Actions run has happened yet.
+- **CI covers one platform.** GitHub Actions runs on Ubuntu with Python 3.12 only. Windows is checked only by the local runs above. The workflow's actions (`checkout@v4`, `setup-python@v5`, `setup-node@v4`, `upload-artifact@v4`) target the deprecated Node.js 20 runtime and should be upgraded.
 - **Server CAD is serialized** by a single lock. Abandoned preview requests are now skipped, but a single slow request still blocks others.
 - **The frontend bundle** is still 1.1 MB, a pre-existing Vite warning.
 

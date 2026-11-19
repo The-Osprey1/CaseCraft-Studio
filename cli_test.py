@@ -48,7 +48,7 @@ def check_3mf(path, printer, res):
     return rep
 
 
-def run(preset_id, pattern, mode, out, magsafe=False, printer=None):
+def run(preset_id, pattern, mode, out, magsafe=False, printer=None, perf_budget=1.5):
     p = Preset.load(preset_id)
     p.pattern.type, p.pattern.mode = pattern, mode
     p.style.magsafe_ring = magsafe
@@ -63,8 +63,11 @@ def run(preset_id, pattern, mode, out, magsafe=False, printer=None):
     r = ce.export_set(p, out, printer=pr)
     total = time.perf_counter() - t0
     print(f"\nTimings (s): {r['timings']}  total={total:.2f}")
-    if pattern in ("voronoi", "grid", "waves", "hex"):
-        check(r["timings"]["backplate"] < 1.5, f"{pattern} backplate generated in {r['timings']['backplate']:.3f}s (< 1.5s)", res)
+    # Wall-clock budget: machine-dependent, so CI (shared, noisy runners) passes a looser
+    # --perf-budget; it still catches real slow-downs. 0 disables the check.
+    if pattern in ("voronoi", "grid", "waves", "hex") and perf_budget > 0:
+        check(r["timings"]["backplate"] < perf_budget,
+              f"{pattern} backplate generated in {r['timings']['backplate']:.3f}s (< {perf_budget:g}s)", res)
     if pattern == "text" and mode == "through" and p.pattern.stencil_bridges:
         check(len(r["design"]["plate"].solids()) == 1, "stencil_bridges: text through-cut keeps backplate as 1 connected solid", res)
     import verify
@@ -211,13 +214,16 @@ if __name__ == "__main__":
     ap.add_argument("--printer", default=None, help="printer profile id (default generic_256)")
     ap.add_argument("--coupon-type", default=None, choices=["camera", "buttons", "ports"],
                     help="fit-test coupon to build with --coupon (default camera)")
+    ap.add_argument("--perf-budget", type=float, default=1.5,
+                    help="max seconds for a lattice backplate build (default 1.5; 0 = skip the timing check)")
     a = ap.parse_args()
     from params import ParamError
     try:
         if a.coupon:
             results = run_coupon(a.preset, a.out, a.coupon_type, a.printer)
         else:
-            results, timings = run(a.preset, a.pattern, a.mode, a.out, magsafe=a.magsafe, printer=a.printer)
+            results, timings = run(a.preset, a.pattern, a.mode, a.out, magsafe=a.magsafe, printer=a.printer,
+                                   perf_budget=a.perf_budget)
             results += stress()
     except ParamError as exc:            # same message the API returns as HTTP 422
         print(f"INVALID DESIGN: {exc}")

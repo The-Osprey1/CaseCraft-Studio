@@ -45,9 +45,10 @@ jobs:
       - name: Full B-rep / export test suite
         run: python -m pytest -m slow -q --junitxml=reports/slow.xml
       - name: CLI gate - modular set on the generic printer
-        run: python cli_test.py --preset iphone_16_pro --pattern voronoi --mode through --magsafe --out out/voronoi
+        # shared runners vary run to run; 4 s still flags a real 2-3x slow-down (local budget: 1.5 s)
+        run: python cli_test.py --preset iphone_16_pro --pattern voronoi --mode through --magsafe --perf-budget 4 --out out/voronoi
       - name: CLI gate - inlay + print-in-place on the H3C profile
-        run: python cli_test.py --preset iphone_15_pro --pattern hex --mode inlay --printer bambu_h3c --out out/h3c
+        run: python cli_test.py --preset iphone_15_pro --pattern hex --mode inlay --printer bambu_h3c --perf-budget 4 --out out/h3c
       - name: CLI gate - fit-test coupons
         run: |
           python cli_test.py --preset iphone_15_pro --coupon --out out/coupon_camera

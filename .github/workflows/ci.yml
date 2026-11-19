@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-fast:
+    name: Python fast tests (rules, 2D checks, 3MF validator, API errors)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: System libraries for OpenCascade + fonts for text patterns
+        run: sudo apt-get update && sudo apt-get install -y libgl1 fonts-liberation fonts-dejavu-core
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -m "not slow" -q --junitxml=reports/fast.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fast-test-report
+          path: reports/
+
+  python-geometry:
+    name: Geometry & export verification (slow)
+    runs-on: ubuntu-latest
+    needs: python-fast
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: System libraries for OpenCascade + fonts for text patterns
+        run: sudo apt-get update && sudo apt-get install -y libgl1 fonts-liberation fonts-dejavu-core
+      - run: pip install -r requirements-dev.txt
+      - name: Full B-rep / export test suite
+        run: python -m pytest -m slow -q --junitxml=reports/slow.xml
+      - name: CLI gate - modular set on the generic printer
+        run: python cli_test.py --preset iphone_16_pro --pattern voronoi --mode through --magsafe --out out/voronoi
+      - name: CLI gate - inlay + print-in-place on the H3C profile
+        run: python cli_test.py --preset iphone_15_pro --pattern hex --mode inlay --printer bambu_h3c --out out/h3c
+      - name: CLI gate - fit-test coupons
+        run: |
+          python cli_test.py --preset iphone_15_pro --coupon --out out/coupon_camera
+          python cli_test.py --preset iphone_16_pro --coupon --coupon-type buttons --out out/coupon_buttons
+          python cli_test.py --preset galaxy_s24 --coupon --coupon-type ports --out out/coupon_ports
+      - name: 3MF reference fixtures (independent validator + lib3mf strict)
+        run: python verify_3mf.py --make-fixtures out/3mf_fixtures
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: geometry-outputs
+          path: |
+            reports/
+            out/3mf_fixtures/
+            out/h3c/PrintInPlace_Report.txt
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run build

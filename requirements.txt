@@ -1,10 +1,12 @@
-build123d>=0.13
-shapely>=2.0
-svgelements>=1.9
-trimesh>=4.0
-numpy
-networkx
-fastapi
-uvicorn[standard]
-python-multipart
-httpx
+# Runtime. Ranges are constrained to the major versions CaseCraft is tested with
+# (tested: build123d 0.13.0, shapely 2.1.2, trimesh 5.1.1, numpy 2.5.3, fastapi 0.163.2, Python 3.12).
+build123d>=0.13,<0.14
+shapely>=2.0,<3
+svgelements>=1.9,<2
+trimesh>=4.0,<6
+numpy>=1.26,<3
+networkx>=3,<4
+fastapi>=0.110,<1
+uvicorn[standard]>=0.30,<1
+python-multipart>=0.0.9,<1
+httpx>=0.27,<1

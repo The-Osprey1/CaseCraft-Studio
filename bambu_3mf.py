@@ -11,8 +11,10 @@ Layout produced (single model file, core-3MF components, Bambu config for slot a
                               plus a <plate> listing the instances.
 Sub-parts of one object share one coordinate frame, so a base + inlay stay co-registered.
 
-NOTE: structure follows Bambu Studio's documented/observed project format; it has been validated
-here by XML/geometry round-trip tests only. Open it in Bambu Studio once to confirm slot colours.
+Standards: the core model is checked by verify_3mf.py (independent parser) and, when installed,
+by lib3mf in strict mode. model_settings.config is a Bambu/Orca extension that no standard
+validator covers: slot assignment has NOT been confirmed in a real slicer by this project --
+see docs/MANUFACTURING_VERIFICATION.md for the manual Bambu Studio check.
 """
 from __future__ import annotations
 
@@ -22,6 +24,15 @@ from pathlib import Path
 from xml.sax.saxutils import escape, quoteattr
 
 import numpy as np
+
+from params import ParamError
+from printers import PrinterProfile, get_printer
+
+BAMBU_NS = "http://schemas.bambulab.com/package/2021"
+
+
+class BedOverflow(ParamError):
+    """Parts do not fit the selected printer's build plate."""
 
 CT = ('<?xml version="1.0" encoding="UTF-8"?>\n'
       '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n'
@@ -68,23 +79,44 @@ def part_from_shape(name, shape, extruder=1, tol=0.01, ang=0.1) -> Part:
     return Part(name, v, f, extruder)
 
 
-def auto_layout(objs: list[Obj], bed=(256.0, 256.0), gap=6.0, margin=5.0):
-    """Shelf-pack objects left->right, wrapping rows. Raises if they don't fit the bed."""
+def auto_layout(objs: list[Obj], bed=(256.0, 256.0), gap=6.0, margin=5.0, bed_z: float | None = None):
+    """Shelf-pack objects left->right, wrapping rows, inside the plate minus `margin`.
+    Raises BedOverflow (a ParamError -> HTTP 422) if they don't fit. This is THE layout used by
+    both the preview's print-bed view and the exported 3MF, so the two cannot disagree."""
+    ux, uy = bed[0] - 2 * margin, bed[1] - 2 * margin
     x = y = margin
     row_h = 0.0
     for o in objs:
         if o.position is not None:
             continue
         lo, hi = o.bbox()
-        w, h = hi[0] - lo[0], hi[1] - lo[1]
+        w, h, z = hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]
+        if bed_z is not None and z > bed_z:
+            raise BedOverflow(f"{o.name} is {z:.0f} mm tall; the selected printer builds up to {bed_z:.0f} mm")
+        if w > ux or h > uy:
+            raise BedOverflow(f"{o.name} ({w:.0f} x {h:.0f} mm) is larger than the usable "
+                              f"{ux:.0f} x {uy:.0f} mm build plate area")
         if x + w > bed[0] - margin:
             x, y, row_h = margin, y + row_h + gap, 0.0
         o.position = (x, y)
         x += w + gap
         row_h = max(row_h, h)
         if y + h > bed[1] - margin:
-            raise ValueError(f"objects do not fit a {bed[0]}x{bed[1]} bed")
+            raise BedOverflow(f"Case components exceed the selected build plate: they need more than the "
+                              f"usable {ux:.0f} x {uy:.0f} mm area. Export the parts separately or choose a "
+                              f"larger printer profile.")
     return objs
+
+
+def layout_for_printer(objs: list[Obj], printer: PrinterProfile | str | None = None) -> list[Obj]:
+    pr = printer if isinstance(printer, PrinterProfile) else get_printer(printer)
+    return auto_layout(objs, bed=(pr.bed_x, pr.bed_y), margin=pr.margin, bed_z=pr.bed_z)
+
+
+def _check_slots(objs: list[Obj], printer: PrinterProfile) -> None:
+    used = sorted({p.extruder for o in objs for p in o.parts})
+    if used and (used[0] < 1 or used[-1] > printer.filament_slots):
+        raise ParamError(f"3MF assigns filament slots {used}; {printer.name} supports 1-{printer.filament_slots}")
 
 
 def _mesh_xml(v: np.ndarray, f: np.ndarray) -> str:
@@ -93,8 +125,11 @@ def _mesh_xml(v: np.ndarray, f: np.ndarray) -> str:
     return f"<mesh><vertices>{vs}</vertices><triangles>{ts}</triangles></mesh>"
 
 
-def write_3mf(path: str | Path, objs: list[Obj], bed=(256.0, 256.0), title="CaseCraft") -> Path:
-    auto_layout(objs, bed)
+def write_3mf(path: str | Path, objs: list[Obj], printer: PrinterProfile | str | None = None,
+              title="CaseCraft") -> Path:
+    pr = printer if isinstance(printer, PrinterProfile) else get_printer(printer)
+    layout_for_printer(objs, pr)
+    _check_slots(objs, pr)
     next_id = 1
     mesh_xml, wrap_xml, build_xml, cfg_objs, cfg_inst = [], [], [], [], []
     for o in objs:
@@ -112,7 +147,8 @@ def write_3mf(path: str | Path, objs: list[Obj], bed=(256.0, 256.0), title="Case
         wrap_xml.append(f'  <object id="{wid}" type="model" name={quoteattr(o.name)}>'
                         f'<components>{comps}</components></object>\n')
         tx, ty = o.position[0] - lo[0], o.position[1] - lo[1]
-        build_xml.append(f'  <item objectid="{wid}" transform="1 0 0 0 1 0 0 0 1 {tx:.5f} {ty:.5f} 0" printable="1"/>\n')
+        # core-spec item (no vendor `printable` attribute: lib3mf strict mode rejects it; default is printable)
+        build_xml.append(f'  <item objectid="{wid}" transform="1 0 0 0 1 0 0 0 1 {tx:.5f} {ty:.5f} 0"/>\n')
         default_ext = o.extruder or o.parts[0].extruder
         parts_cfg = "".join(
             f'  <part id="{pid}" subtype="normal_part">\n'
@@ -128,7 +164,8 @@ def write_3mf(path: str | Path, objs: list[Obj], bed=(256.0, 256.0), title="Case
                         f'   <metadata key="identify_id" value="{wid + 100}"/>\n  </model_instance>\n')
     model = ('<?xml version="1.0" encoding="UTF-8"?>\n'
              '<model unit="millimeter" xml:lang="en-US" '
-             'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">\n'
+             'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" '
+             f'xmlns:BambuStudio="{BAMBU_NS}">\n'
              f' <metadata name="Application">{escape(title)}</metadata>\n'
              ' <metadata name="BambuStudio:3mfVersion">1</metadata>\n'
              ' <resources>\n' + "".join(mesh_xml) + "".join(wrap_xml) + ' </resources>\n'
@@ -165,23 +202,29 @@ def build_set_objects(oriented: dict, slots: dict | None = None) -> list[Obj]:
     return objs
 
 
-def write_set_3mf(path, oriented: dict, slots=None, bed=(256.0, 256.0)) -> Path:
-    return write_3mf(path, build_set_objects(oriented, slots), bed)
+SINGLE_MATERIAL_SLOTS = {k: 1 for k in DEFAULT_SLOTS}
 
 
-def write_backplate_multicolor_3mf(path, oriented: dict, base_slot=1, inlay_slot=2) -> Path:
+def write_set_3mf(path, oriented: dict, slots=None, printer=None) -> Path:
+    return write_3mf(path, build_set_objects(oriented, slots), printer)
+
+
+def write_backplate_multicolor_3mf(path, oriented: dict, base_slot=1, inlay_slot=2, printer=None) -> Path:
     """Standalone backplate: ONE object, two sub-parts -> extruder 1 (base) and 2 (inlay)."""
     parts = [part_from_shape("Backplate_Base", oriented["Backplate_PLA"], base_slot)]
     if "Backplate_Inlay" in oriented:
         parts.append(part_from_shape("Backplate_Inlay", oriented["Backplate_Inlay"], inlay_slot))
-    return write_3mf(path, [Obj("Backplate", parts)])
+    return write_3mf(path, [Obj("Backplate", parts)], printer)
 
 
 def write_toolchanger_3mf(path, design: dict, oriented: dict, slots: dict | None = None,
-                          bed=(256.0, 256.0)) -> Path:
+                          printer=None) -> Path:
     """Print-in-place assembly for multi-toolhead printers (e.g., H3C): co-registers Frame (ext 1),
     Backplate (ext 2), Inlay (ext 3), and captured Buttons (ext 2) inside ONE object sitting on
-    Z=0, plus CameraRing alongside it on the build plate."""
+    Z=0, plus CameraRing alongside it on the build plate. EXPERIMENTAL: see print_in_place.py."""
+    pr = printer if isinstance(printer, PrinterProfile) else get_printer(printer)
+    if not pr.toolchanger:
+        raise ParamError(f"Print-in-place needs a toolchanger printer profile; {pr.name} has a single nozzle")
     s = {**DEFAULT_SLOTS, **(slots or {})}
     assembly_parts = [
         part_from_shape("Frame_TPU", design["frame"], s["frame"]),
@@ -195,7 +238,7 @@ def write_toolchanger_3mf(path, design: dict, oriented: dict, slots: dict | None
         Obj("Case_InPlace_Assembly", assembly_parts),
         Obj("CameraRing", [part_from_shape("CameraRing", oriented["CameraRing"], s["ring"])]),
     ]
-    return write_3mf(path, objs, bed=bed, title="CaseCraft Toolchanger In-Place")
+    return write_3mf(path, objs, pr, title="CaseCraft Toolchanger In-Place (experimental)")
 
 
 def summarize_3mf(path) -> dict:

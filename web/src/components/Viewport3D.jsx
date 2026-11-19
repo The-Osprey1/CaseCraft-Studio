@@ -83,20 +83,22 @@ function PhoneGhostMesh({ b64, visible }) {
   );
 }
 
-function BuildPlate() {
+// The selected printer's plate (from the preview response), centred on the origin exactly as the
+// server centres the Case_Set.3mf layout. A red plate means the parts do not fit (export blocked).
+function BuildPlate({ x = 256, y = 256, fits = true }) {
   return (
     <group position={[0, 0, 0]}>
-      {/* Textured PEI plate slab sitting just below Z=0 */}
       <mesh position={[0, 0, -0.35]} receiveShadow>
-        <boxGeometry args={[256, 256, 0.7]} />
-        <meshStandardMaterial color="#18202c" roughness={0.85} metalness={0.1} />
+        <boxGeometry args={[x, y, 0.7]} />
+        <meshStandardMaterial color={fits ? "#18202c" : "#3b1219"} roughness={0.85} metalness={0.1} />
       </mesh>
-      {/* Perimeter border */}
-      <mesh position={[0, 0, 0.02]} rotation={[0, 0, 0]}>
-        <ringGeometry args={[0, 0, 4]} />
-      </mesh>
-      {/* 256x256 XY grid at Z=0 */}
-      <gridHelper args={[256, 16, "#38bdf8", "#263345"]} rotation={[Math.PI / 2, 0, 0]} position={[0, 0, 0.02]} />
+      {/* 16 mm XY grid at Z=0, stretched to the plate's aspect ratio */}
+      <gridHelper
+        args={[x, Math.max(1, Math.round(x / 16)), fits ? "#38bdf8" : "#f43f5e", "#263345"]}
+        scale={[1, 1, y / x]}
+        rotation={[Math.PI / 2, 0, 0]}
+        position={[0, 0, 0.02]}
+      />
     </group>
   );
 }
@@ -118,6 +120,7 @@ export default function Viewport3D({
   colors,
   visibleGroups,
   showPhoneGhost,
+  bed,
   hideHud = false,
 }) {
   const parts = preview?.parts || [];
@@ -164,7 +167,7 @@ export default function Viewport3D({
           )}
         </group>
 
-        {viewMode === "bed" ? <BuildPlate /> : <AssemblyFloor />}
+        {viewMode === "bed" ? <BuildPlate x={bed?.x} y={bed?.y} fits={bed?.fits !== false} /> : <AssemblyFloor />}
 
         <OrbitControls
           makeDefault
@@ -182,7 +185,7 @@ export default function Viewport3D({
           <div className="pointer-events-none absolute top-3 left-3 flex flex-wrap gap-2">
             {viewMode === "bed" ? (
               <span className="rounded-md border border-cyan-500/40 bg-slate-950/85 px-2.5 py-1 text-xs font-medium text-cyan-300 backdrop-blur">
-                Bambu Lab 256×256 mm Build Plate (Z=0) · Pre-Oriented Back-Down
+                {bed?.x ?? 256}×{bed?.y ?? 256} mm Build Plate (Z=0) · Pre-Oriented Back-Down
               </span>
             ) : (
               <span className="rounded-md border border-slate-700/70 bg-slate-950/85 px-2.5 py-1 text-xs font-medium text-slate-300 backdrop-blur">

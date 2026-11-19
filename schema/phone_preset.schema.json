@@ -2,78 +2,296 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "CaseCraft phone preset",
   "type": "object",
-  "required": ["id", "body", "camera"],
+  "required": [
+    "id",
+    "body",
+    "camera"
+  ],
   "additionalProperties": false,
   "properties": {
-    "$schema": {"type": "string"},
-    "id": {"type": "string", "pattern": "^[a-z0-9_]+$"},
-    "name": {"type": "string"},
+    "$schema": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_]+$"
+    },
+    "name": {
+      "type": "string"
+    },
     "body": {
-      "type": "object", "additionalProperties": false,
-      "required": ["length", "width", "thickness", "corner_radius"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "length",
+        "width",
+        "thickness",
+        "corner_radius"
+      ],
       "properties": {
-        "length": {"type": "number", "exclusiveMinimum": 0},
-        "width": {"type": "number", "exclusiveMinimum": 0},
-        "thickness": {"type": "number", "exclusiveMinimum": 0},
-        "corner_radius": {"type": "number", "minimum": 0}
+        "length": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "width": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "thickness": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "corner_radius": {
+          "type": "number",
+          "minimum": 0
+        }
       }
     },
     "camera": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "x": {"type": "number", "description": "from top-left of BACK view"},
-        "y": {"type": "number"},
-        "width": {"type": "number", "exclusiveMinimum": 0},
-        "height": {"type": "number", "exclusiveMinimum": 0},
-        "radius": {"type": "number", "minimum": 0}
+        "x": {
+          "type": "number",
+          "description": "from top-left of BACK view"
+        },
+        "y": {
+          "type": "number"
+        },
+        "width": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "island width at its BASE (against the phone back)"
+        },
+        "height": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "radius": {
+          "type": "number",
+          "minimum": 0
+        },
+        "opening": {
+          "description": "optional clear aperture at the case's OUTER face; the aperture is lofted from the island base to this profile. dx/dy shift it from the island centre like x/y (back view: +dx right, +dy down).",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "width",
+            "height"
+          ],
+          "properties": {
+            "width": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "height": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "radius": {
+              "type": "number",
+              "minimum": 0
+            },
+            "dx": {
+              "type": "number"
+            },
+            "dy": {
+              "type": "number"
+            }
+          }
+        }
       }
     },
     "buttons": {
       "type": "array",
       "items": {
-        "type": "object", "additionalProperties": false, "required": ["id", "side", "pos", "length"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "side",
+          "pos",
+          "length"
+        ],
         "properties": {
-          "id": {"type": "string"},
-          "side": {"enum": ["left", "right", "top", "bottom"]},
-          "pos": {"type": "number", "minimum": 0},
-          "length": {"type": "number", "exclusiveMinimum": 0}
+          "id": {
+            "type": "string"
+          },
+          "side": {
+            "enum": [
+              "left",
+              "right",
+              "top",
+              "bottom"
+            ]
+          },
+          "pos": {
+            "type": "number",
+            "minimum": 0
+          },
+          "length": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
         }
       }
     },
     "ports": {
       "type": "array",
       "items": {
-        "type": "object", "additionalProperties": false, "required": ["id", "side", "width", "height"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "side",
+          "width",
+          "height"
+        ],
         "properties": {
-          "id": {"type": "string"},
-          "side": {"enum": ["left", "right", "top", "bottom"]},
-          "center": {"type": "number"},
-          "width": {"type": "number", "exclusiveMinimum": 0},
-          "height": {"type": "number", "exclusiveMinimum": 0},
-          "radius": {"type": "number", "minimum": 0},
-          "z_offset": {"type": "number"}
+          "id": {
+            "type": "string"
+          },
+          "side": {
+            "enum": [
+              "left",
+              "right",
+              "top",
+              "bottom"
+            ]
+          },
+          "center": {
+            "type": "number"
+          },
+          "width": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "height": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "radius": {
+            "type": "number",
+            "minimum": 0
+          },
+          "z_offset": {
+            "type": "number"
+          }
         }
       }
     },
     "clearances": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "frame_to_phone_offset": {"type": "number", "minimum": 0, "maximum": 1.0, "default": 0.25},
-        "backplate_snap_clearance": {"type": "number", "minimum": 0.05, "maximum": 0.4, "default": 0.15},
-        "button_clearance": {"type": "number", "minimum": 0.05, "maximum": 0.5, "default": 0.2},
-        "camera_ring_clearance": {"type": "number", "minimum": 0.05, "maximum": 0.4, "default": 0.15}
+        "frame_to_phone_offset": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1.0,
+          "default": 0.25
+        },
+        "backplate_snap_clearance": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 0.4,
+          "default": 0.15
+        },
+        "button_clearance": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 0.5,
+          "default": 0.2
+        },
+        "camera_ring_clearance": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 0.4,
+          "default": 0.15
+        }
       }
     },
-    "style": {"type": "object", "description": "see params.Style for all keys and defaults"},
+    "style": {
+      "type": "object",
+      "description": "see params.Style for all keys and defaults"
+    },
     "pattern": {
-      "type": "object", "additionalProperties": false,
+      "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "type": {"enum": ["solid", "hex", "voronoi", "grid", "waves", "svg", "text"]},
-        "mode": {"enum": ["through", "deboss", "inlay"]},
-        "depth": {"type": "number"}, "margin": {"type": "number"}, "web": {"type": "number"},
-        "stencil_bridges": {"type": "boolean"},
-        "params": {"type": "object"}
+        "type": {
+          "enum": [
+            "solid",
+            "hex",
+            "voronoi",
+            "grid",
+            "waves",
+            "svg",
+            "text"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "through",
+            "deboss",
+            "inlay"
+          ]
+        },
+        "depth": {
+          "type": "number"
+        },
+        "margin": {
+          "type": "number"
+        },
+        "web": {
+          "type": "number"
+        },
+        "stencil_bridges": {
+          "type": "boolean"
+        },
+        "params": {
+          "type": "object"
+        }
+      }
+    },
+    "verification": {
+      "description": "optional provenance. Omit (or keep 'approximate') unless you have evidence: 'physically_fit_tested' means a printed case was fitted to the real device.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "enum": [
+            "approximate",
+            "dimensionally_verified",
+            "physically_fit_tested"
+          ],
+          "default": "approximate"
+        },
+        "source": {
+          "type": "string",
+          "description": "where the dimensions came from"
+        },
+        "fit_test": {
+          "enum": [
+            "untested",
+            "passed",
+            "failed"
+          ],
+          "default": "untested"
+        },
+        "notes": {
+          "type": "string"
+        },
+        "unverified_features": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       }
     }
-  }
+  },
+  "description": "Device preset for CaseCraft Studio. Documentation and editor support only: params.py (Preset.check) is the single authoritative source of validation rules, including combined-parameter rules this schema cannot express."
 }

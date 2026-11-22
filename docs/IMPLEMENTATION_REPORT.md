@@ -127,6 +127,52 @@ The environment used for all baseline and final runs:
   - The window opened off-screen on first launch under 188 % display scaling, because pywebview's `CenterScreen` is wrong under DPI scaling. The position is now always explicit and checked against the monitors.
   - Confirm dialogs read "127.0.0.1 says"; they are now native.
 
+### Milestone F: pattern library
+- **2D geometry split out:** all planar geometry (plate outline, camera cut-out, MagSafe ring and pocket, pattern cells, connectivity) moved from `cad_engine.py` to a new `patterns.py`. `cad_engine.py` re-exports the moved names, so the server, tests and CLI are unchanged.
+- **New pattern types:**
+  - `dots`: exact circles
+  - `triangles`: a triangular lattice with an angle
+  - `chevron`: zig-zag stripes. Its rib check shares the waves rule through `stripe_cos()`, using the constant zig-zag slope (4A/L) in place of the sine's steepest slope.
+  - `voronoi` gained `seed` and `relax`; `text` and `svg` gained `rotation`.
+- **Pattern finishing:** `pattern.edge` (`clip` | `whole` | `fade`), `pattern.corner_radius` (0–5 mm) and `pattern.fade_width` (2–60 mm), validated in `params.py` and the JSON schema.
+  - `clip` stays the default, so saved designs build exactly as before.
+  - `fade` shrinks cells with a smoothstep down to 25 % of full size. Faded cells under 2 mm² are dropped, because they would close up on an FDM print.
+  - `corner_radius` is a morphological opening, so a cut-out can only shrink and connectivity can only improve.
+- **Instant 2D feedback:** `GET /api/patterns` returns generator metadata (types, defaults, control ranges, border modes, fonts). `POST /api/pattern-preview` and `/api/pattern-gallery` return back-view SVG path data. These endpoints do not take the CAD lock, so they answer in milliseconds during a 3D rebuild.
+- **Frontend:**
+  - `PatternControls.jsx` was rewritten to render its controls from `/api/patterns` instead of hard-coded lists.
+  - New components: `PatternPreviewCard` (live 2D back view with cut-out count, open area and the connectivity verdict), `PlatePreview` and `ViewportToolbar`.
+  - New hooks: `usePatternSpecs`, `usePatternRequest`.
+  - `Viewport3D` is now lazy-loaded. Three.js sits in its own ~900 kB chunk, and the entry chunk is ~245 kB.
+- **CLI:** `cli_test.py` gained `--edge` and `--corner-radius`, and validates the design before building, so an invalid combination exits 2.
+- **Tests:** a new `test_patterns.py` covers the generators, edge modes, corner rounding, previews and the new parameter rules. `test_geometry.py` gained B-rep checks for the new options.
+
+**Milestone F results** (2026-11-22, Windows 11, Python 3.12):
+
+| Command | Result |
+|---|---|
+| `python -m pytest` | **206 passed**, 0 failed, 0 skipped (3 m 57 s) |
+| `cli_test.py --pattern dots --mode through` | **54/54**; backplate 1.21 s |
+| `cli_test.py --pattern triangles --mode through --magsafe` | **54/54**; backplate 1.24 s |
+| `cli_test.py --pattern chevron --mode through` | **54/54**; backplate 0.38 s |
+| `cli_test.py --pattern chevron --mode deboss` | **54/54**; backplate 0.29 s |
+| `cli_test.py --pattern hex --mode through --edge whole` | **54/54**; backplate 0.69 s |
+| `cli_test.py --pattern voronoi --mode through --edge fade --corner-radius 1.5` | **54/54**; backplate 0.82 s |
+| `cli_test.py --pattern grid --mode inlay --edge fade --printer bambu_h3c` | **70/70**, including the multicolor and toolchanger 3MFs; backplate 0.57 s |
+| `cli_test.py --pattern hex --mode through` (regression check of the default) | **58/58**; backplate 0.81 s. The 4 extra checks come from the previous run's `Backplate_Multicolor.3mf`, still in the shared `--out` folder and validated too. |
+| `cd web && npm run build` | builds with no chunk warning (entry 245 kB; lazy 3D chunk 901 kB, under the raised 1000 kB limit) |
+| Manual UI check (built app on uvicorn, in-app browser) | see below |
+
+All CLI runs used the default `iphone_15_pro` preset and printer unless stated.
+
+The manual UI check confirmed:
+- the pattern gallery shows all ten types with thumbnails
+- choosing Chevron updates the 2D card at once (27 cut-outs, 60.5 % open, "Prints as one piece"), and the rebuilt 3D back view matches it
+- on Hexagon, switching the border to Fade shows the fade-distance slider, and the 2D card and 3D model both update (115 → 103 cut-outs, 55.7 % → 34.1 % open)
+- there were no console errors and no server errors
+
+Note: `dots` and `triangles` backplates take ~1.2 s, the slowest lattices and closest to the 1.5 s local timing budget.
+
 ## B. File-level change summary
 
 **Modified:**
@@ -148,6 +194,10 @@ The environment used for all baseline and final runs:
 - Frontend: `web/src/api.js`, `web/src/constants.jsx`, `web/src/hooks/usePreview.js`, `web/src/hooks/useExports.js`, `web/src/components/{Fields,PatternControls,ValidationStatus,DeviceBadge,PrinterSelect}.jsx`
 
 **Removed:** none. `test_regressions.py` and `dfm.py`/`safe_ops.py` are unchanged; `CrossSectionDiagram.jsx` is unchanged.
+
+**Milestone F:**
+- Created: `patterns.py`, `test_patterns.py`, `web/src/hooks/{usePatternSpecs,usePatternRequest}.js`, `web/src/components/{PatternPreviewCard,PlatePreview,ViewportToolbar}.jsx`
+- Modified: `cad_engine.py` (2D code moved out), `params.py`, `schema/phone_preset.schema.json`, `server.py`, `cli_test.py`, `test_geometry.py`, `web/src/{App,constants}.jsx`, `web/src/components/{Fields,PatternControls,Viewport3D}.jsx`, `web/vite.config.js`, `README.md`, this report
 
 ## C. Testing results
 
@@ -213,7 +263,8 @@ The manual UI check confirmed:
 - **Text patterns on Linux CI** depend on system fonts. Arial is substituted, via `fonts-liberation`, which can shift text metrics slightly from Windows.
 - **CI covers one platform.** GitHub Actions runs on Ubuntu with Python 3.12 only. Windows is checked only by the local runs above. The workflow's actions (`checkout@v4`, `setup-python@v5`, `setup-node@v4`, `upload-artifact@v4`) target the deprecated Node.js 20 runtime and should be upgraded.
 - **Server CAD is serialized** by a single lock. Abandoned preview requests are now skipped, but a single slow request still blocks others.
-- **The frontend bundle** is still 1.1 MB, a pre-existing Vite warning.
+- **The frontend bundle:** Milestone F lazy-loads the 3D viewer. The entry chunk is ~245 kB, but the Three.js chunk is still ~900 kB, and the Vite warning limit was raised to 1000 kB to cover it.
+- **Pattern previews are 2D only.** The instant preview shows the cut-outs and the connectivity verdict, not deboss depth or the inlay sub-part; those appear only in the 3D rebuild.
 
 ## E. Manual verification checklist (Bambu Lab H3C)
 
@@ -229,7 +280,8 @@ See [MANUFACTURING_VERIFICATION.md](MANUFACTURING_VERIFICATION.md#manual-checkli
 2. **Caliper-verified dimensions for the two most-used presets**, with recorded sources, so at least some presets move beyond `approximate`.
 3. **A print-in-place clearance profile.** If the experiment shows bonding, add separate co-print clearances (snap gap ≥ 2 layers, buttons modelled off their pocket ceiling) instead of changing the snap-fit defaults.
 4. **Camera bump height in the preset**, so the ring and unibody can warn when the lens protrudes past the bezel.
-5. **Code-split the Three.js bundle** to remove the 1.1 MB warning and speed up the first load.
+5. **Trim the Three.js chunk.** Milestone F lazy-loads the viewer (entry ~245 kB), but the 3D chunk is still ~900 kB; importing only the used drei helpers would shrink it.
+6. **Physical prints of the new patterns,** especially `fade` and `corner_radius`, to confirm that the 2 mm² smallest faded cell and the rounded corners hold up on a real FDM print.
 
 ## External references consulted
 

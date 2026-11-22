@@ -1,494 +1,358 @@
-import React from "react";
-import { Upload } from "lucide-react";
-import { FINISH_MODES, PATTERN_CARDS, SAMPLE_SVGS } from "../constants.jsx";
-import { SliderField } from "./Fields.jsx";
+import React, { useMemo } from "react";
+import { Loader2, RotateCcw, Upload } from "lucide-react";
+import { FINISH_MODES, PATTERN_ICONS, SAMPLE_SVGS } from "../constants.jsx";
+import { Segmented, SliderField, ToggleRow } from "./Fields.jsx";
 import FilePickButton from "./FilePickButton.jsx";
+import PlatePreview from "./PlatePreview.jsx";
 
-// Pattern type cards, finish mode, per-pattern parameters and the MagSafe pocket toggle.
-// Moved from App.jsx (renderPatternControls); behaviour unchanged.
-export default function PatternControls({ config, updateConfig, uiMode, onError }) {
-  const handleSelectPatternType = (ptype) => {
-    updateConfig((c) => {
-      c.pattern.type = ptype;
-      if (ptype === "hex") {
-        c.pattern.params = { pitch: c.pattern.params?.pitch || 9.0 };
-      } else if (ptype === "voronoi") {
-        c.pattern.params = {
-          pitch: c.pattern.params?.pitch || 11.0,
-          seed: c.pattern.params?.seed ?? 42,
-        };
-      } else if (ptype === "waves") {
-        c.pattern.params = {
-          pitch: c.pattern.params?.pitch || 7.0,
-          amplitude: c.pattern.params?.amplitude ?? 3.5,
-          wavelength: c.pattern.params?.wavelength ?? 28.0,
-        };
-      } else if (ptype === "grid") {
-        c.pattern.params = {
-          pitch: c.pattern.params?.pitch || 8.5,
-          angle: c.pattern.params?.angle ?? 45.0,
-        };
-      } else if (ptype === "text") {
-        c.pattern.params = {
-          text: c.pattern.params?.text || "CASECRAFT",
-          size: c.pattern.params?.size ?? 0.65,
-          rotation: c.pattern.params?.rotation ?? 0,
-          bold: c.pattern.params?.bold ?? true,
-        };
-      } else if (ptype === "svg") {
-        c.pattern.params = {
-          svg: c.pattern.params?.svg || SAMPLE_SVGS.star.svg,
-          size: c.pattern.params?.size ?? 0.6,
-        };
-      }
-      return c;
-    }, true);
-  };
+// Per-type settings tuned in this session: switching hex -> dots -> hex brings the hex back.
+const remembered = new Map();
 
-  const handleSvgUpload = (text, fileName) => {
+function ArtworkPicker({ value, onPick, onError }) {
+  const upload = (text, fileName) => {
     if (!/<svg[\s>]/i.test(text)) {
       onError?.(`${fileName} does not look like an SVG drawing.`);
       return;
     }
+    onPick(text);
+  };
+  return (
+    <div className="space-y-2">
+      <FilePickButton
+        accept=".svg,image/svg+xml"
+        extensions={[".svg"]}
+        onText={upload}
+        onError={onError}
+        className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-cyan-500/50 bg-cyan-500/5 px-3 py-2.5 text-xs font-medium text-cyan-300 transition hover:bg-cyan-500/10"
+      >
+        <Upload className="h-3.5 w-3.5" />
+        Upload an SVG drawing
+      </FilePickButton>
+      <div className="grid grid-cols-3 gap-1.5">
+        {Object.entries(SAMPLE_SVGS).map(([k, item]) => (
+          <button
+            key={k}
+            type="button"
+            aria-pressed={value === item.svg}
+            onClick={() => onPick(item.svg)}
+            className={`rounded-lg border px-2 py-1.5 text-[11px] transition ${
+              value === item.svg
+                ? "border-cyan-400 bg-cyan-500/15 text-cyan-100"
+                : "border-slate-700 bg-slate-950 text-slate-300 hover:border-cyan-500"
+            }`}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Control({ c, params, setParam, setParamNow, onError }) {
+  const value = params?.[c.key];
+  switch (c.kind) {
+    case "slider":
+      return (
+        <SliderField
+          label={c.label}
+          value={value ?? c.min}
+          min={c.min}
+          max={c.max}
+          step={c.step}
+          unit={c.unit}
+          hint={c.hint}
+          onChange={(v) => setParam(c.key, v)}
+        />
+      );
+    case "select":
+      return (
+        <label className="flex items-center justify-between gap-3 text-xs">
+          <span className="text-slate-300">{c.label}</span>
+          <select
+            value={value ?? c.options[0]}
+            onChange={(e) => setParamNow(c.key, e.target.value)}
+            className="min-w-0 max-w-[60%] rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-slate-100 outline-none focus:border-cyan-400"
+          >
+            {c.options.map((o) => (
+              <option key={o} value={o}>
+                {o}
+              </option>
+            ))}
+          </select>
+        </label>
+      );
+    case "text":
+      return (
+        <label className="flex flex-col gap-1.5">
+          <span className="text-xs font-medium text-slate-300">{c.label}</span>
+          <input
+            type="text"
+            maxLength={c.max_length}
+            value={value ?? ""}
+            onChange={(e) => setParam(c.key, e.target.value)}
+            className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white outline-none focus:border-cyan-400"
+          />
+        </label>
+      );
+    case "toggle":
+      return (
+        <label className="flex cursor-pointer items-center gap-2 text-xs text-slate-300">
+          <input
+            type="checkbox"
+            checked={Boolean(value)}
+            onChange={(e) => setParamNow(c.key, e.target.checked)}
+            className="accent-cyan-400"
+          />
+          {c.label}
+        </label>
+      );
+    case "xy": {
+      // stored in design coordinates; shown as seen from the back (+X = right)
+      const sx = c.back_view_x ? -1 : 1;
+      const [x, y] = Array.isArray(value) ? value : [0, 0];
+      return (
+        <div className="space-y-3">
+          <SliderField
+            label="Move left / right"
+            value={sx * x}
+            min={c.min}
+            max={c.max}
+            step={c.step}
+            unit={c.unit}
+            onChange={(v) => setParam(c.key, [sx * v, y])}
+          />
+          <SliderField
+            label="Move down / up"
+            value={y}
+            min={c.min}
+            max={c.max}
+            step={c.step}
+            unit={c.unit}
+            onChange={(v) => setParam(c.key, [x, v])}
+          />
+        </div>
+      );
+    }
+    case "svg":
+      return <ArtworkPicker value={value} onPick={(svg) => setParamNow(c.key, svg)} onError={onError} />;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Backplate pattern panel, built from the server's pattern library (GET /api/patterns):
+ * a gallery of every pattern drawn on this phone, the finish, the border treatment, the
+ * type's own settings, corner rounding, and the MagSafe pocket.
+ */
+export default function PatternControls({ config, updateConfig, uiMode, onError, specs, specsError, onRetrySpecs,
+                                          gallery, colors }) {
+  const types = specs?.types || [];
+  const pat = config?.pattern;
+  const spec = types.find((t) => t.id === pat?.type);
+  const galleryFrame = useMemo(() => (gallery ? { ...gallery, magsafe: "" } : null), [gallery]);
+
+  if (!config) return null;
+  if (!specs) {
+    return specsError ? (
+      <div className="rounded-xl border border-rose-500/40 bg-rose-950/40 p-3 text-xs text-rose-200">
+        Could not load the pattern library: {specsError}
+        <button
+          type="button"
+          onClick={onRetrySpecs}
+          className="mt-2 flex items-center gap-1.5 rounded-lg border border-rose-400/40 px-2.5 py-1 text-rose-100 hover:bg-rose-500/10"
+        >
+          <RotateCcw className="h-3.5 w-3.5" /> Try again
+        </button>
+      </div>
+    ) : (
+      <div className="flex items-center gap-2 py-6 text-xs text-slate-400">
+        <Loader2 className="h-4 w-4 animate-spin" /> Loading patterns…
+      </div>
+    );
+  }
+
+  const set = (fn, immediate = false) =>
     updateConfig((c) => {
-      c.pattern.type = "svg";
-      c.pattern.params = {
-        ...c.pattern.params,
-        svg: text,
-        size: c.pattern.params?.size ?? 0.65,
-      };
+      fn(c.pattern, c);
       return c;
+    }, immediate);
+  const setParam = (key, v) => set((p) => (p.params = { ...p.params, [key]: v }));
+  const setParamNow = (key, v) => set((p) => (p.params = { ...p.params, [key]: v }), true);
+
+  const selectType = (id) => {
+    if (id === pat.type) return;
+    remembered.set(pat.type, pat.params);
+    const next = types.find((t) => t.id === id);
+    set((p) => {
+      p.type = id;
+      p.params = structuredClone(remembered.get(id) || next.defaults);
     }, true);
   };
 
-    if (!config) return null;
-    return (
-      <div className="space-y-4">
-        {/* Visual Pattern Cards */}
-        <div className="grid grid-cols-2 gap-2.5">
-          {PATTERN_CARDS.map((card) => {
-            const active = config.pattern.type === card.id;
+  const isEmblem = spec?.family === "emblem";
+  const edges = (specs.edges || []).filter((e) => spec?.edges?.includes(e.id));
+  const edge = pat.edge ?? "clip";
+  const shared = specs.shared || {};
+  const finish = FINISH_MODES.find((m) => m.id === pat.mode);
+
+  return (
+    <div className="space-y-5">
+      <section className="space-y-2" aria-label="Pattern">
+        <div className="grid grid-cols-4 gap-1.5">
+          {types.map((t) => {
+            const active = pat.type === t.id;
+            const thumb = gallery?.types?.[t.id];
             return (
               <button
-                key={card.id}
+                key={t.id}
                 type="button"
-                onClick={() => handleSelectPatternType(card.id)}
-                className={`rounded-xl border p-3 text-left transition-all ${
+                aria-pressed={active}
+                title={t.description}
+                onClick={() => selectType(t.id)}
+                className={`flex flex-col items-center gap-1 rounded-xl border px-1 pb-1.5 pt-2 transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400 ${
                   active
-                    ? "border-cyan-400 bg-cyan-500/10 ring-1 ring-cyan-400/25"
-                    : "border-slate-800 bg-slate-900/70 hover:border-slate-700"
+                    ? "border-cyan-400 bg-cyan-500/10 ring-1 ring-cyan-400/30"
+                    : "border-slate-800 bg-slate-900/60 hover:border-slate-600"
                 }`}
               >
-                <div
-                  className={`mb-2 flex h-9 w-9 items-center justify-center rounded-lg ${
-                    active
-                      ? "bg-cyan-500/20 text-cyan-300"
-                      : "bg-slate-800 text-slate-400"
-                  }`}
+                <span className="flex aspect-square w-full items-center justify-center overflow-hidden rounded-lg text-slate-500">
+                  {thumb && galleryFrame ? (
+                    <PlatePreview
+                      frame={galleryFrame}
+                      cuts={thumb.cuts}
+                      colors={colors}
+                      mode={pat.mode}
+                      crop="middle"
+                      className="h-full w-full"
+                      label={`${t.label} pattern`}
+                    />
+                  ) : (
+                    PATTERN_ICONS[t.id]
+                  )}
+                </span>
+                <span
+                  className={`text-center text-[11px] font-medium leading-tight ${active ? "text-cyan-100" : "text-slate-300"}`}
                 >
-                  {card.icon}
-                </div>
-                <div className="text-xs font-semibold text-white">
-                  {card.name}
-                </div>
-                <div className="mt-0.5 text-[11px] leading-snug text-slate-400">
-                  {card.desc}
-                </div>
+                  {t.label}
+                </span>
               </button>
             );
           })}
         </div>
+        {spec && <p className="text-[11px] text-slate-400">{spec.description}.</p>}
+      </section>
 
-        {/* Finish / Extrusion Pills */}
-        {config.pattern.type !== "solid" && (
-          <div className="space-y-3 border-t border-slate-800/80 pt-4">
-            <div className="space-y-1.5">
-              <span className="text-xs font-semibold text-slate-300">
-                Backplate Finish
-              </span>
-              <div className="grid grid-cols-3 gap-2">
-                {FINISH_MODES.map((m) => {
-                  const active = config.pattern.mode === m.id;
-                  return (
-                    <button
-                      key={m.id}
-                      type="button"
-                      onClick={() =>
-                        updateConfig((c) => {
-                          c.pattern.mode = m.id;
-                          return c;
-                        }, true)
-                      }
-                      className={`rounded-lg border px-2.5 py-2 text-center transition ${
-                        active
-                          ? "border-cyan-400 bg-cyan-500/15 text-cyan-200"
-                          : "border-slate-800 bg-slate-950/60 text-slate-400 hover:text-slate-200"
-                      }`}
-                    >
-                      <div className="text-xs font-semibold">{m.label}</div>
-                    </button>
-                  );
-                })}
-              </div>
-              <p className="text-[11px] text-slate-500">
-                {FINISH_MODES.find((m) => m.id === config.pattern.mode)?.desc}
-              </p>
-            </div>
+      {pat.type !== "solid" && (
+        <>
+          <Segmented
+            label="Finish"
+            options={FINISH_MODES}
+            value={pat.mode}
+            onChange={(id) => set((p) => (p.mode = id), true)}
+            hint={finish?.desc}
+          />
 
-            {/* Contextual Pattern Settings */}
-            {config.pattern.type === "hex" && (
-              <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3.5">
+          {edges.length > 0 && (
+            <div className="space-y-3">
+              <Segmented
+                label="Border"
+                options={edges}
+                value={edge}
+                onChange={(id) => set((p) => (p.edge = id), true)}
+                hint={edges.find((e) => e.id === edge)?.description}
+              />
+              {edge === "fade" && shared.fade_width && (
                 <SliderField
-                  label="Hex Cell Spacing (Pitch)"
-                  value={config.pattern.params?.pitch ?? 9.0}
-                  min={5.5}
-                  max={16.0}
-                  step={0.5}
-                  hint="Smaller pitch = finer honeycomb mesh"
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.params = { ...c.pattern.params, pitch: v };
-                      return c;
-                    })
-                  }
+                  {...shared.fade_width}
+                  value={pat.fade_width ?? 15}
+                  onChange={(v) => set((p) => (p.fade_width = v))}
                 />
-              </div>
-            )}
-
-            {config.pattern.type === "voronoi" && (
-              <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3.5">
-                <SliderField
-                  label="Voronoi Cell Spacing"
-                  value={config.pattern.params?.pitch ?? 11.0}
-                  min={7.0}
-                  max={18.0}
-                  step={0.5}
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.params = { ...c.pattern.params, pitch: v };
-                      return c;
-                    })
-                  }
-                />
-                <SliderField
-                  label="Pattern Seed"
-                  value={config.pattern.params?.seed ?? 42}
-                  min={1}
-                  max={99}
-                  step={1}
-                  unit=""
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.params = { ...c.pattern.params, seed: v };
-                      return c;
-                    })
-                  }
-                />
-              </div>
-            )}
-
-            {config.pattern.type === "waves" && (
-              <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3.5">
-                <SliderField
-                  label="Wave Spacing (Pitch)"
-                  value={config.pattern.params?.pitch ?? 7.0}
-                  min={4.5}
-                  max={14.0}
-                  step={0.5}
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.params = { ...c.pattern.params, pitch: v };
-                      return c;
-                    })
-                  }
-                />
-                <SliderField
-                  label="Wave Amplitude"
-                  value={config.pattern.params?.amplitude ?? 3.5}
-                  min={1.0}
-                  max={8.0}
-                  step={0.5}
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.params = { ...c.pattern.params, amplitude: v };
-                      return c;
-                    })
-                  }
-                />
-              </div>
-            )}
-
-            {config.pattern.type === "grid" && (
-              <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3.5">
-                <SliderField
-                  label="Grid Spacing (Pitch)"
-                  value={config.pattern.params?.pitch ?? 8.5}
-                  min={5.5}
-                  max={16.0}
-                  step={0.5}
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.params = { ...c.pattern.params, pitch: v };
-                      return c;
-                    })
-                  }
-                />
-                <SliderField
-                  label="Grid Angle"
-                  value={config.pattern.params?.angle ?? 45.0}
-                  min={0}
-                  max={90}
-                  step={15}
-                  unit="°"
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.params = { ...c.pattern.params, angle: v };
-                      return c;
-                    })
-                  }
-                />
-              </div>
-            )}
-
-            {config.pattern.type === "text" && (
-              <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3.5">
-                <label className="flex flex-col gap-1.5">
-                  <span className="text-xs font-medium text-slate-300">
-                    Monogram Text
-                  </span>
-                  <input
-                    type="text"
-                    maxLength={18}
-                    value={config.pattern.params?.text ?? "CASECRAFT"}
-                    onChange={(e) =>
-                      updateConfig((c) => {
-                        c.pattern.params = {
-                          ...c.pattern.params,
-                          text: e.target.value,
-                        };
-                        return c;
-                      })
-                    }
-                    className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-mono text-white outline-none focus:border-cyan-400"
-                  />
-                </label>
-                <SliderField
-                  label="Text Scale"
-                  value={config.pattern.params?.size ?? 0.65}
-                  min={0.25}
-                  max={0.9}
-                  step={0.05}
-                  unit="×"
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.params = { ...c.pattern.params, size: v };
-                      return c;
-                    })
-                  }
-                />
-                <SliderField
-                  label="Rotation"
-                  value={config.pattern.params?.rotation ?? 0}
-                  min={-90}
-                  max={90}
-                  step={5}
-                  unit="°"
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.params = { ...c.pattern.params, rotation: v };
-                      return c;
-                    })
-                  }
-                />
-                <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(config.pattern.params?.bold ?? true)}
-                    onChange={(e) =>
-                      updateConfig((c) => {
-                        c.pattern.params = {
-                          ...c.pattern.params,
-                          bold: e.target.checked,
-                        };
-                        return c;
-                      }, true)
-                    }
-                    className="accent-cyan-400"
-                  />
-                  Bold Font Weight
-                </label>
-              </div>
-            )}
-
-            {config.pattern.type === "svg" && (
-              <div className="space-y-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3.5">
-                <FilePickButton
-                  accept=".svg,image/svg+xml"
-                  extensions={[".svg"]}
-                  onText={handleSvgUpload}
-                  onError={onError}
-                  className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-cyan-500/50 bg-cyan-500/5 px-3 py-2.5 text-xs font-medium text-cyan-300 hover:bg-cyan-500/10 transition"
-                >
-                  <Upload className="h-3.5 w-3.5" />
-                  Upload Custom .SVG Artwork
-                </FilePickButton>
-
-                <div className="space-y-1.5">
-                  <span className="text-[11px] text-slate-400">
-                    Quick Vector Emblems
-                  </span>
-                  <div className="grid grid-cols-3 gap-1.5">
-                    {Object.entries(SAMPLE_SVGS).map(([k, item]) => (
-                      <button
-                        key={k}
-                        type="button"
-                        onClick={() =>
-                          updateConfig((c) => {
-                            c.pattern.params = {
-                              ...c.pattern.params,
-                              svg: item.svg,
-                              size: c.pattern.params?.size ?? 0.6,
-                            };
-                            return c;
-                          }, true)
-                        }
-                        className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-[11px] text-slate-300 hover:border-cyan-500 transition"
-                      >
-                        {item.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <SliderField
-                  label="Artwork Scale"
-                  value={config.pattern.params?.size ?? 0.6}
-                  min={0.25}
-                  max={0.9}
-                  step={0.05}
-                  unit="×"
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.params = { ...c.pattern.params, size: v };
-                      return c;
-                    })
-                  }
-                />
-              </div>
-            )}
-
-            {config.pattern.mode === "through" &&
-              (config.pattern.type === "text" || config.pattern.type === "svg") && (
-                <label className="flex cursor-pointer items-center justify-between rounded-xl border border-slate-800 bg-slate-900/70 px-3.5 py-2.5">
-                  <div>
-                    <div className="text-xs font-medium text-slate-200">
-                      Auto Stencil Bridges
-                    </div>
-                    <div className="text-[11px] text-slate-400">
-                      Anchors inner islands of O / A / B cutouts
-                    </div>
-                  </div>
-                  <input
-                    type="checkbox"
-                    checked={Boolean(config.pattern.stencil_bridges ?? true)}
-                    onChange={(e) =>
-                      updateConfig((c) => {
-                        c.pattern.stencil_bridges = e.target.checked;
-                        return c;
-                      }, true)
-                    }
-                    className="h-4 w-4 accent-cyan-400"
-                  />
-                </label>
               )}
+            </div>
+          )}
 
-            {/* Advanced pattern parameters only in Pro Mode */}
-            {uiMode === "pro" && (
-              <div className="space-y-3 border-t border-slate-800/80 pt-3">
-                <SliderField
-                  label="Edge Margin"
-                  value={config.pattern.margin}
-                  min={1.5}
-                  max={10.0}
-                  step={0.5}
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.margin = v;
-                      return c;
-                    })
-                  }
+          {spec?.controls?.length > 0 && (
+            <section className="space-y-3.5 rounded-xl border border-slate-800 bg-slate-900/70 p-3.5" aria-label={`${spec.label} settings`}>
+              {spec.controls.map((c) => (
+                <Control
+                  key={c.key}
+                  c={c}
+                  params={pat.params}
+                  setParam={setParam}
+                  setParamNow={setParamNow}
+                  onError={onError}
                 />
+              ))}
+            </section>
+          )}
+
+          {spec?.rounding && shared.corner_radius && (
+            <SliderField
+              {...shared.corner_radius}
+              value={pat.corner_radius ?? 0}
+              onChange={(v) => set((p) => (p.corner_radius = v))}
+            />
+          )}
+
+          {pat.mode === "through" && isEmblem && (
+            <ToggleRow
+              label="Stencil bridges"
+              hint="Thin bridges hold the middles of O, A and B in place"
+              checked={pat.stencil_bridges ?? true}
+              onChange={(v) => set((p) => (p.stencil_bridges = v), true)}
+            />
+          )}
+
+          {uiMode === "pro" && (
+            <section className="space-y-3 border-t border-slate-800/80 pt-3" aria-label="Pattern limits">
+              {shared.margin && (
+                <SliderField {...shared.margin} value={pat.margin} onChange={(v) => set((p) => (p.margin = v))} />
+              )}
+              {shared.web && <SliderField {...shared.web} value={pat.web} onChange={(v) => set((p) => (p.web = v))} />}
+              {pat.mode !== "through" && (
                 <SliderField
-                  label="Min Web Ligament"
-                  value={config.pattern.web}
-                  min={1.0}
-                  max={4.0}
+                  label="Deboss / inlay depth"
+                  value={pat.depth}
+                  min={0.4}
+                  max={Math.max(0.4, (config.style?.backplate_thickness ?? 1.8) - 0.6)}
                   step={0.1}
-                  onChange={(v) =>
-                    updateConfig((c) => {
-                      c.pattern.web = v;
-                      return c;
-                    })
-                  }
+                  onChange={(v) => set((p) => (p.depth = v))}
                 />
-                {config.pattern.mode !== "through" && (
-                  <SliderField
-                    label="Deboss / Inlay Depth"
-                    value={config.pattern.depth}
-                    min={0.4}
-                    max={Math.max(0.4, (config.style?.backplate_thickness ?? 1.8) - 0.6)}
-                    step={0.1}
-                    onChange={(v) =>
-                      updateConfig((c) => {
-                        c.pattern.depth = v;
-                        return c;
-                      })
-                    }
-                  />
-                )}
-              </div>
-            )}
-          </div>
-        )}
+              )}
+            </section>
+          )}
+        </>
+      )}
 
-        {/* MagSafe Magnet Ring Pocket Toggle */}
-        <label className="flex cursor-pointer items-center justify-between rounded-xl border border-slate-800 bg-slate-900/75 px-3.5 py-3">
-          <div>
-            <div className="text-xs font-semibold text-white">
-              Internal MagSafe Ring Pocket
-            </div>
-            <div className="text-[11px] text-slate-400">
-              {config.style?.magsafe_depth ?? 0.75} mm recessed 54/46 mm magnet ring + alignment tail
-            </div>
-          </div>
-          <input
-            type="checkbox"
-            checked={Boolean(config.style?.magsafe_ring)}
-            onChange={(e) =>
-              updateConfig((c) => {
-                c.style.magsafe_ring = e.target.checked;
-                return c;
-              }, true)
-            }
-            className="h-4 w-4 accent-cyan-400"
-          />
-        </label>
-        {config.style?.magsafe_ring && (
-          <SliderField
-            label="MagSafe Ring Vertical Offset"
-            value={config.style?.magsafe_offset_y ?? 0}
-            min={-30}
-            max={30}
-            step={0.5}
-            hint="Negative moves the ring toward the bottom. Match your phone's charging coil and keep clear of the camera."
-            onChange={(v) =>
-              updateConfig((c) => {
-                c.style.magsafe_offset_y = v;
-                return c;
-              })
-            }
-          />
-        )}
-      </div>
-    );
+      <ToggleRow
+        label="MagSafe magnet pocket"
+        hint={`${config.style?.magsafe_depth ?? 0.75} mm pocket for a 54 mm magnet ring and its alignment tail`}
+        checked={config.style?.magsafe_ring}
+        onChange={(v) =>
+          updateConfig((c) => {
+            c.style.magsafe_ring = v;
+            return c;
+          }, true)
+        }
+      />
+      {config.style?.magsafe_ring && (
+        <SliderField
+          label="MagSafe ring position"
+          value={config.style?.magsafe_offset_y ?? 0}
+          min={-30}
+          max={30}
+          step={0.5}
+          hint="Negative moves the ring towards the bottom. Line it up with your phone's charging coil and keep it clear of the camera."
+          onChange={(v) =>
+            updateConfig((c) => {
+              c.style.magsafe_offset_y = v;
+              return c;
+            })
+          }
+        />
+      )}
+    </div>
+  );
 }

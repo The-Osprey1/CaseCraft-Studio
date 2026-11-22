@@ -1,24 +1,23 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
   Check,
   Download,
-  FileCode2,
-  Grid3X3,
-  Layers,
   Loader2,
   Palette,
   Plus,
-  RefreshCw,
   Sliders,
   Smartphone,
   Sparkles,
   Trash2,
   Wand2,
 } from "lucide-react";
-import Viewport3D from "./components/Viewport3D.jsx";
 import CrossSectionDiagram from "./components/CrossSectionDiagram.jsx";
 import PatternControls from "./components/PatternControls.jsx";
+import PatternPreviewCard from "./components/PatternPreviewCard.jsx";
+import ViewportToolbar from "./components/ViewportToolbar.jsx";
+import usePatternSpecs from "./hooks/usePatternSpecs.js";
+import usePatternRequest from "./hooks/usePatternRequest.js";
 import ValidationStatus, { validationState } from "./components/ValidationStatus.jsx";
 import DeviceBadge from "./components/DeviceBadge.jsx";
 import PrinterSelect from "./components/PrinterSelect.jsx";
@@ -37,6 +36,9 @@ import FileMenu from "./components/FileMenu.jsx";
 import FilePickButton from "./components/FilePickButton.jsx";
 import { apiFetch, downloadBlob, postJson } from "./api.js";
 import { IS_DESKTOP, call, confirmAction, saveTextFile } from "./desktop.js";
+
+// three.js and the 3D viewer load in their own chunk, after the panel is on screen
+const Viewport3D = lazy(() => import("./components/Viewport3D.jsx"));
 
 const COUPON_TYPES = [
   { id: "camera", label: "Camera & Snap", desc: "Camera ring, backplate snap joint and nearest button" },
@@ -98,6 +100,36 @@ export default function App() {
   const printer = useMemo(() => printers.find((p) => p.id === printerId), [printers, printerId]);
   const loading = status === "loading";
   const dirty = !isCurrent;
+
+  // ---- pattern panel: live 2D back view + thumbnail gallery (fast endpoints, no CAD wait)
+  const patternPanelOpen =
+    Boolean(config) && ((uiMode === "simple" && wizardStep === 2) || (uiMode === "pro" && proTab === "pattern"));
+  const { specs: patternSpecs, error: patternSpecsError, retry: retryPatternSpecs } = usePatternSpecs();
+  const patternPreview = usePatternRequest("/api/pattern-preview", config, { enabled: patternPanelOpen });
+  // thumbnails use each type's defaults, so only the settings they share change them
+  const galleryBody = useMemo(
+    () => config && { ...config, pattern: { ...config.pattern, type: "solid", params: {} } },
+    [config]
+  );
+  const patternGallery = usePatternRequest("/api/pattern-gallery", galleryBody, {
+    enabled: patternPanelOpen,
+    delay: 250,
+  });
+  const patternTypeLabel = patternSpecs?.types?.find((t) => t.id === config?.pattern?.type)?.label;
+
+  // ---- camera: frame the side that matters for the current step (the back while styling)
+  const [viewRequest, setViewRequest] = useState(null);
+  const requestView = useCallback((name) => setViewRequest((r) => ({ name, nonce: (r?.nonce || 0) + 1 })), []);
+  const preferredView = patternPanelOpen ? "back" : "iso";
+  useEffect(() => {
+    if (viewMode === "assembly") requestView(preferredView);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preferredView]);
+  const handleViewMode = (mode) => {
+    setViewMode(mode);
+    if (mode === "bed") requestView("bed");
+    else if (mode === "assembly") requestView(preferredView);
+  };
 
   const loadPresets = useCallback(async () => {
     const data = await (await apiFetch("/api/presets")).json();
@@ -346,26 +378,8 @@ export default function App() {
           </button>
         </div>
 
-        {/* Right: Rebuild + Primary Export Actions */}
+        {/* Right: printer, validation and the primary export actions */}
         <div className="flex shrink-0 items-center gap-2">
-          <button
-            type="button"
-            disabled={!config || loading}
-            onClick={refresh}
-            className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg border px-2.5 py-1.5 text-xs font-medium transition disabled:opacity-50 ${
-              dirty
-                ? "border-amber-500/50 bg-amber-500/15 text-amber-300 hover:bg-amber-500/25"
-                : "border-slate-700/80 bg-slate-800/80 text-slate-200 hover:bg-slate-800"
-            }`}
-          >
-            {loading ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin text-cyan-400" />
-            ) : (
-              <RefreshCw className="h-3.5 w-3.5 text-cyan-400" />
-            )}
-            {loading ? "Solving…" : "Rebuild"}
-          </button>
-
           <PrinterSelect printers={printers} value={printerId} onChange={handleSelectPrinter} />
           <ValidationStatus state={vState} />
 
@@ -544,15 +558,18 @@ export default function App() {
                     {/* STEP 2: BACKPLATE DESIGN */}
                     {wizardStep === 2 && (
                       <div className="space-y-4">
-                        <div>
-                          <h2 className="text-sm font-semibold text-white">
-                            Backplate Style & Finish
-                          </h2>
-                          <p className="mt-0.5 text-xs text-slate-400">
-                            Customize the snap-in rigid backplate pattern or laser-cut outline.
-                          </p>
-                        </div>
-                        {<PatternControls config={config} updateConfig={updateConfig} uiMode={uiMode} onError={setError} />}
+                        <PatternPreviewCard request={patternPreview} colors={colors} typeLabel={patternTypeLabel} />
+                        <PatternControls
+                          config={config}
+                          updateConfig={updateConfig}
+                          uiMode={uiMode}
+                          onError={setError}
+                          specs={patternSpecs}
+                          specsError={patternSpecsError}
+                          onRetrySpecs={retryPatternSpecs}
+                          gallery={patternGallery.data}
+                          colors={colors}
+                        />
                       </div>
                     )}
 
@@ -1535,7 +1552,22 @@ export default function App() {
                     )}
 
                     {/* PRO TAB 3: PATTERN */}
-                    {proTab === "pattern" && <PatternControls config={config} updateConfig={updateConfig} uiMode={uiMode} onError={setError} />}
+                    {proTab === "pattern" && (
+                      <div className="space-y-4">
+                        <PatternPreviewCard request={patternPreview} colors={colors} typeLabel={patternTypeLabel} />
+                        <PatternControls
+                          config={config}
+                          updateConfig={updateConfig}
+                          uiMode={uiMode}
+                          onError={setError}
+                          specs={patternSpecs}
+                          specsError={patternSpecsError}
+                          onRetrySpecs={retryPatternSpecs}
+                          gallery={patternGallery.data}
+                          colors={colors}
+                        />
+                      </div>
+                    )}
 
                     {/* PRO TAB 4: COLORS */}
                     {proTab === "colors" && (
@@ -1600,94 +1632,20 @@ export default function App() {
 
         {/* RIGHT PANE: FLOATING CANVAS HUD + VIEWPORT */}
         <main className="relative flex-1 overflow-hidden">
-          {/* Unified Non-Overlapping Top HUD Row */}
-          <div className="pointer-events-none absolute top-3 left-3 right-3 z-20 flex flex-wrap items-start justify-between gap-2">
-            {/* Top-Left Summary / Bed Pill */}
-            <div className="pointer-events-auto flex flex-wrap items-center gap-1.5">
-              {viewMode === "bed" && (
-                <span
-                  className={`rounded-lg border bg-slate-900/85 px-2.5 py-1.5 text-xs font-medium shadow backdrop-blur-md ${
-                    preview?.bed?.fits === false ? "border-rose-500/60 text-rose-300" : "border-cyan-500/40 text-cyan-300"
-                  }`}
-                >
-                  {preview?.printer?.name || "Build plate"} · {preview?.bed?.x ?? 256}×{preview?.bed?.y ?? 256} mm
-                  {preview?.bed?.fits === false ? " · parts do not fit" : " · Case_Set.3mf layout"}
-                </span>
-              )}
-              {preview?.summary && (
-                <span className="rounded-lg border border-slate-800 bg-slate-900/85 px-2.5 py-1.5 text-xs text-slate-300 shadow backdrop-blur-md">
-                  Outer: {preview.summary.outer_width} × {preview.summary.outer_length} × {preview.summary.total_height} mm
-                </span>
-              )}
-            </div>
-
-            {/* Top-Right Viewport Controls Bar */}
-            <div className="pointer-events-auto flex flex-wrap items-center gap-2 rounded-xl border border-slate-800/90 bg-slate-900/85 p-1.5 shadow-xl backdrop-blur-md">
-              <div className="flex items-center gap-0.5 rounded-lg bg-slate-950/80 p-0.5 text-xs">
-                {[
-                  { id: "assembly", label: "3D Assembly", icon: Layers },
-                  { id: "bed", label: "Print Bed (Z=0)", icon: Grid3X3 },
-                  { id: "svg", label: "2D Laser SVG", icon: FileCode2 },
-                ].map(({ id, label, icon: Icon }) => (
-                  <button
-                    key={id}
-                    type="button"
-                    onClick={() => setViewMode(id)}
-                    className={`flex items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1 font-medium transition ${
-                      viewMode === id
-                        ? "border border-cyan-500/30 bg-cyan-500/20 text-cyan-300"
-                        : "text-slate-400 hover:text-slate-200"
-                    }`}
-                  >
-                    <Icon className="h-3.5 w-3.5" />
-                    {label}
-                  </button>
-                ))}
-              </div>
-
-              {viewMode === "assembly" && (
-                <>
-                  <div className="h-4 w-px bg-slate-800" />
-                  <div className="flex items-center gap-2 px-1.5">
-                    <span className="text-[11px] font-medium text-slate-400">
-                      Explode
-                    </span>
-                    <input
-                      aria-label="Exploded View"
-                      type="range"
-                      min={0}
-                      max={1}
-                      step={0.01}
-                      value={explode}
-                      onChange={(e) => setExplode(parseFloat(e.target.value))}
-                      className="h-1.5 w-20 cursor-pointer accent-cyan-400"
-                    />
-                    <span className="w-8 text-right font-mono text-[11px] text-cyan-300">
-                      {Math.round(explode * 100)}%
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setShowPhoneGhost((v) => !v)}
-                    className={`whitespace-nowrap rounded-lg border px-2.5 py-1 text-[11px] font-medium transition ${
-                      showPhoneGhost
-                        ? "border-cyan-500/50 bg-cyan-500/15 text-cyan-300"
-                        : "border-slate-700 text-slate-400 hover:text-slate-200"
-                    }`}
-                  >
-                    Phone Ghost
-                  </button>
-                </>
-              )}
-
-              {loading && (
-                <div className="flex items-center gap-1.5 rounded-lg bg-cyan-500/15 px-2.5 py-1 text-[11px] font-medium text-cyan-300">
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                  OCCT
-                </div>
-              )}
-            </div>
-          </div>
+          <ViewportToolbar
+            preview={preview}
+            viewMode={viewMode}
+            onViewMode={handleViewMode}
+            onView={requestView}
+            explode={explode}
+            onExplode={setExplode}
+            showPhoneGhost={showPhoneGhost}
+            onTogglePhoneGhost={() => setShowPhoneGhost((v) => !v)}
+            loading={loading}
+            dirty={dirty && Boolean(preview)}
+            canRebuild={Boolean(config)}
+            onRebuild={refresh}
+          />
 
           {/* Error Toast Banner */}
           <div className="absolute top-20 right-3 z-20 flex max-w-md flex-col items-end gap-2">
@@ -1762,11 +1720,9 @@ export default function App() {
             <div className="flex h-full w-full flex-col items-center justify-center bg-slate-950 p-8 pt-20">
               <div className="mb-4 flex w-full max-w-xl items-center justify-between">
                 <div>
-                  <h2 className="text-sm font-semibold text-slate-200">
-                    Laser-Cut Backplate Profile (Laser_Backplate.svg)
-                  </h2>
+                  <h2 className="text-sm font-semibold text-slate-200">Laser-cut backplate outline</h2>
                   <p className="text-xs text-slate-400">
-                    1:1 mm closed paths · Rear View · Ready for Glowforge / LightBurn
+                    Closed paths at 1:1 mm, seen from the back. Opens in LightBurn, Glowforge and similar tools.
                   </p>
                 </div>
                 <button
@@ -1792,16 +1748,26 @@ export default function App() {
             </div>
           ) : (
             <>
-              <Viewport3D
-                preview={preview}
-                viewMode={viewMode}
-                explode={explode}
-                colors={colors}
-                visibleGroups={visibleGroups}
-                showPhoneGhost={showPhoneGhost}
-                bed={preview?.bed}
-                hideHud
-              />
+              <Suspense
+                fallback={
+                  <div className="flex h-full w-full items-center justify-center bg-slate-950 text-xs text-slate-400">
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading the 3D viewer…
+                  </div>
+                }
+              >
+                <Viewport3D
+                  preview={preview}
+                  viewMode={viewMode}
+                  explode={explode}
+                  colors={colors}
+                  visibleGroups={visibleGroups}
+                  showPhoneGhost={showPhoneGhost}
+                  bed={preview?.bed}
+                  viewRequest={viewRequest}
+                  stale={dirty && Boolean(preview)}
+                  hideHud
+                />
+              </Suspense>
 
               {/* Unified Non-Overlapping Bottom HUD Stack */}
               <div className="pointer-events-none absolute bottom-3 left-3 right-3 z-10 flex flex-col gap-2">

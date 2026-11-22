@@ -34,6 +34,7 @@ import appdirs
 import bambu_3mf
 import cad_engine as ce
 import dfm
+import patterns
 import print_in_place
 from params import ParamError, Preset
 from printers import DEFAULT_PRINTER, PRINTERS, PrinterProfile, get_printer
@@ -522,6 +523,36 @@ def _build_single_part(p: Preset, part: str, pr: PrinterProfile) -> tuple[bytes,
                 raise HTTPException(status_code=404, detail=f"Part {filename} not generated for current preset")
             return _shape_to_stl_bytes(oriented[key], tol=0.01, ang=0.1), dl_name, media_type
         return target.read_bytes(), dl_name, media_type
+
+
+@router.get("/patterns")
+def get_patterns():
+    """Pattern library metadata (types, defaults, control ranges, border modes, fonts)."""
+    return patterns.public_specs()
+
+
+# The 2D endpoints below are pure Shapely (glyphs have their own lock), so they never wait for
+# the CAD lock: the UI gets pattern feedback in milliseconds while a 3D rebuild is running.
+@router.post("/pattern-preview")
+def get_pattern_preview(payload: dict):
+    p = _preset_from_payload(payload)
+    try:
+        return patterns.pattern_preview(p)
+    except ParamError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise _server_error("Pattern preview failed", exc) from exc
+
+
+@router.post("/pattern-gallery")
+def get_pattern_gallery(payload: dict):
+    p = _preset_from_payload(payload)
+    try:
+        return patterns.pattern_gallery(p)
+    except ParamError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise _server_error("Pattern gallery failed", exc) from exc
 
 
 @router.post("/export-part")

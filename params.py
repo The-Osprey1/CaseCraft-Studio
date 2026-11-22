@@ -18,14 +18,22 @@ from pathlib import Path
 from typing import Any
 
 SIDES = ("left", "right", "top", "bottom")
-PATTERN_DEFAULT_PITCH = {"hex": 9.0, "voronoi": 11.0, "grid": 8.5, "waves": 7.0}
+PATTERN_DEFAULT_PITCH = {"hex": 9.0, "voronoi": 11.0, "grid": 8.5, "waves": 7.0,
+                         "dots": 7.0, "triangles": 12.0, "chevron": 7.0}
 MIN_PATTERN_PITCH = 3.0   # bounds the cell count (and loop count) of every lattice generator
 MIN_PATTERN_WEB = 0.4     # one extrusion width
 MIN_FLOOR = 0.6           # thinnest backplate skin left under a deboss/inlay or pocket
 MAX_TEXT_LEN = 64
+MAX_FONT_LEN = 64
 MIN_WALL = 1.0            # thinnest TPU side wall accepted
-PATTERN_TYPES = ("solid", "hex", "voronoi", "grid", "waves", "svg", "text")
+PATTERN_TYPES = ("solid", "hex", "voronoi", "grid", "waves", "svg", "text", "dots", "triangles", "chevron")
 PATTERN_MODES = ("through", "deboss", "inlay")
+# How lattice patterns meet the border of the patterned area: clip (cells cut at the border, the
+# original behaviour), whole (only complete cells) or fade (cells shrink towards the border).
+EDGE_MODES = ("clip", "whole", "fade")
+MAX_CORNER_RADIUS = 5.0
+FADE_WIDTH_RANGE = (2.0, 60.0)
+STRIPE_SHAPES = {"waves": "sine", "chevron": "chevron"}
 # (name, hard min, hard max, recommended min, recommended max). Hard limits match the JSON
 # schema; the recommended band is CaseCraft's default tuning range, NOT a physically validated
 # tolerance -- outside it we warn and point at the fit-test coupon.
@@ -37,14 +45,22 @@ CLEARANCE_LIMITS = (
 )
 
 
+def stripe_cos(amplitude: float, wavelength: float, shape: str = "sine") -> float:
+    """cos of the steepest slope of a stripe pattern's bands: the sine of `waves` (max slope
+    2*pi*A/L) or the straight zig-zag of `chevron` (constant slope 4*A/L)."""
+    wl = max(wavelength, 6.0)
+    slope = 4 * amplitude / wl if shape == "chevron" else 2 * math.pi * amplitude / wl
+    return math.cos(math.atan(slope))
+
+
 def wave_cos(amplitude: float, wavelength: float) -> float:
     """cos of the steepest slope of the waves pattern's sine bands."""
-    return math.cos(math.atan(2 * math.pi * amplitude / max(wavelength, 6.0)))
+    return stripe_cos(amplitude, wavelength, "sine")
 
 
-def wave_min_rib(pitch: float, web: float, amplitude: float, wavelength: float) -> float:
-    """Narrowest rib left between waves bands (slot width is clamped to >= 1 mm)."""
-    spacing = pitch * wave_cos(amplitude, wavelength)
+def wave_min_rib(pitch: float, web: float, amplitude: float, wavelength: float, shape: str = "sine") -> float:
+    """Narrowest rib left between stripe bands (slot width is clamped to >= 1 mm)."""
+    spacing = pitch * stripe_cos(amplitude, wavelength, shape)
     slot = max(1.0, spacing - web)
     return spacing - slot
 
@@ -159,13 +175,19 @@ class Style:
 
 @dataclass
 class Pattern:
-    type: str = "solid"          # solid | hex | voronoi | grid | waves | svg | text
+    type: str = "solid"          # solid | hex | voronoi | grid | waves | svg | text | dots | triangles | chevron
     mode: str = "through"        # through | deboss | inlay
     depth: float = 0.8           # deboss / inlay depth
     margin: float = 3.0          # inset from plate edge and camera cutout
     web: float = 1.6             # min material between cut-outs
     stencil_bridges: bool = True
-    params: dict[str, Any] = field(default_factory=dict)  # hex/voronoi: pitch | grid: pitch, angle | waves: pitch, amplitude, wavelength | svg: svg, size, offset | text: text, font, font_size, size, offset
+    edge: str = "clip"           # lattices: clip (cells cut at the border) | whole | fade
+    corner_radius: float = 0.0   # rounds the corners of lattice/stripe cut-outs (mm); 0 = sharp
+    fade_width: float = 15.0     # edge == "fade": distance from the border over which cells shrink
+    # hex/dots: pitch | voronoi: pitch, seed, relax | grid/triangles: pitch, angle |
+    # waves/chevron: pitch, amplitude, wavelength | svg: svg, size, rotation, offset |
+    # text: text, font, font_size, size, rotation, bold, offset
+    params: dict[str, Any] = field(default_factory=dict)
 
 
 VERIFICATION_LEVELS = ("approximate", "dimensionally_verified", "physically_fit_tested")
@@ -428,12 +450,12 @@ class Preset:
                 and self.pattern.web < 2 * MIN_PATTERN_WEB):
             warns.append(f"pattern.web {self.pattern.web:g} mm is below two extrusion widths "
                          f"({2 * MIN_PATTERN_WEB:g} mm); the lattice ribs will be fragile")
-        if not errs and self.pattern.type == "waves":
-            pr = self.pattern.params
-            rib = wave_min_rib(pr.get("pitch", PATTERN_DEFAULT_PITCH["waves"]), self.pattern.web,
-                               pr.get("amplitude", 3.5), pr.get("wavelength", 28.0))
+        if not errs and self.pattern.type in STRIPE_SHAPES:
+            pr, t = self.pattern.params, self.pattern.type
+            rib = wave_min_rib(pr.get("pitch", PATTERN_DEFAULT_PITCH[t]), self.pattern.web,
+                               pr.get("amplitude", 3.5), pr.get("wavelength", 28.0), STRIPE_SHAPES[t])
             if rib < self.pattern.web - 1e-6:
-                warns.append(f"waves: ribs narrow to {rib:.2f} mm at the steepest point "
+                warns.append(f"{t}: ribs narrow to {rib:.2f} mm at the steepest point "
                              f"(below the {self.pattern.web:g} mm web); increase pitch or wavelength")
         return errs, warns
 
@@ -516,33 +538,83 @@ class Preset:
             errs.append(f"pattern.web must be >= {MIN_PATTERN_WEB} mm")
         if not (_finite(pat.margin) and pat.margin >= 0):
             errs.append("pattern.margin must be >= 0")
+        if pat.edge not in EDGE_MODES:
+            errs.append("pattern.edge must be " + "|".join(EDGE_MODES))
+        if not (_finite(pat.corner_radius) and 0 <= pat.corner_radius <= MAX_CORNER_RADIUS):
+            errs.append(f"pattern.corner_radius must be within 0-{MAX_CORNER_RADIUS:g} mm")
+        lo, hi = FADE_WIDTH_RANGE
+        if not (_finite(pat.fade_width) and lo <= pat.fade_width <= hi):
+            errs.append(f"pattern.fade_width must be within {lo:g}-{hi:g} mm")
         if not isinstance(pat.params, dict):
             return errs + ["pattern.params must be an object"]
+        pr = pat.params
+        pitch = None
         if pat.type in PATTERN_DEFAULT_PITCH:
-            pitch = pat.params.get("pitch", PATTERN_DEFAULT_PITCH[pat.type])
+            pitch = pr.get("pitch", PATTERN_DEFAULT_PITCH[pat.type])
             if not (_finite(pitch) and pitch >= MIN_PATTERN_PITCH):
                 errs.append(f"pattern.params.pitch must be a number >= {MIN_PATTERN_PITCH} mm")
+                pitch = None
             elif _finite(pat.web) and pitch <= pat.web:
                 errs.append("pattern.params.pitch must be larger than pattern.web")
-        if pat.type == "waves":
-            amp = pat.params.get("amplitude", 3.5)
-            wl = pat.params.get("wavelength", 28.0)
+                pitch = None
+        if pitch is not None and _finite(pat.web):
+            if pat.type == "triangles" and pitch < math.sqrt(3) * pat.web + 1.0:
+                errs.append(f"triangles: pattern.params.pitch must be >= {math.sqrt(3) * pat.web + 1.0:.2f} mm "
+                            f"for a {pat.web:g} mm web (the cut-outs would vanish)")
+            if pat.type == "dots" and pitch < pat.web + 1.0:
+                errs.append("dots: pattern.params.pitch must exceed pattern.web by at least 1 mm")
+        if pat.type in STRIPE_SHAPES:
+            amp = pr.get("amplitude", 3.5)
+            wl = pr.get("wavelength", 28.0)
             if not (_finite(amp) and 0 <= amp <= 50):
                 errs.append("pattern.params.amplitude must be within 0-50 mm")
             if not (_finite(wl) and wl > 0):
                 errs.append("pattern.params.wavelength must be > 0")
-            elif _finite(amp) and _finite(pitch) and 0 <= amp <= 50:
+            elif _finite(amp) and pitch is not None and 0 <= amp <= 50:
                 # rib between bands, measured perpendicular to the steepest part of the curve
-                # (slots never go below 1 mm): see cad_engine._wave_polys
-                rib = wave_min_rib(pitch, pat.web, amp, wl)
+                # (slots never go below 1 mm): see patterns._stripe_raw
+                rib = wave_min_rib(pitch, pat.web, amp, wl, STRIPE_SHAPES[pat.type])
                 if rib < MIN_PATTERN_WEB:
-                    errs.append(f"waves too steep for this pitch: ribs would be {max(rib, 0):.2f} mm wide "
+                    errs.append(f"{pat.type} too steep for this pitch: ribs would be {max(rib, 0):.2f} mm wide "
                                 f"(< {MIN_PATTERN_WEB} mm); increase pitch or wavelength, or reduce amplitude")
-        if pat.type == "text" and len(str(pat.params.get("text", ""))) > MAX_TEXT_LEN:
-            errs.append(f"pattern.params.text must be <= {MAX_TEXT_LEN} characters")
+        if pat.type in ("grid", "triangles") and not (_finite(pr.get("angle", 0.0)) and abs(pr.get("angle", 0.0)) <= 360):
+            errs.append("pattern.params.angle must be a number within -360-360 degrees")
+        if pat.type == "voronoi":
+            if not _finite(pr.get("seed", 42)):
+                errs.append("pattern.params.seed must be a number")
+            relax = pr.get("relax", 0)
+            if not (_finite(relax) and float(relax).is_integer() and 0 <= relax <= 5):
+                errs.append("pattern.params.relax must be a whole number within 0-5")
+        if pat.type in ("text", "svg"):
+            errs += self._placement_errors(pr)
+        if pat.type == "svg" and not (isinstance(pr.get("svg"), str) and pr["svg"].strip()):
+            errs.append("pattern.params.svg must contain SVG markup (choose an emblem or upload a drawing)")
+        if pat.type == "text":
+            if len(str(pr.get("text", ""))) > MAX_TEXT_LEN:
+                errs.append(f"pattern.params.text must be <= {MAX_TEXT_LEN} characters")
+            font = pr.get("font", "Arial")
+            if not (isinstance(font, str) and 0 < len(font) <= MAX_FONT_LEN):
+                errs.append(f"pattern.params.font must be a font name of 1-{MAX_FONT_LEN} characters")
         if pat.type != "solid" and pat.mode in ("deboss", "inlay"):
             max_depth = self.style.backplate_thickness - MIN_FLOOR
             if not (_finite(pat.depth) and 0 < pat.depth <= max_depth):
                 errs.append(f"pattern.depth must be within 0-{max_depth:.2f} mm "
                             f"(leaves >= {MIN_FLOOR} mm backplate floor)")
+        return errs
+
+    @staticmethod
+    def _placement_errors(pr: dict) -> list[str]:
+        """Size / rotation / offset of a text or SVG emblem: fraction of the patterned area,
+        degrees, and mm from the plate centre in DESIGN coordinates (+X = the phone's right seen
+        from the front, so +X moves the emblem LEFT on the back view; +Y = towards the top)."""
+        errs = []
+        size = pr.get("size", 0.7)
+        if not (_finite(size) and 0 < size <= 1.5):
+            errs.append("pattern.params.size must be within 0-1.5 (fraction of the patterned area)")
+        rot = pr.get("rotation", 0.0)
+        if not (_finite(rot) and abs(rot) <= 360):
+            errs.append("pattern.params.rotation must be a number within -360-360 degrees")
+        off = pr.get("offset", (0.0, 0.0))
+        if not (isinstance(off, (list, tuple)) and len(off) == 2 and all(_finite(v) and abs(v) <= 100 for v in off)):
+            errs.append("pattern.params.offset must be [x, y] in mm, each within -100-100")
         return errs

@@ -102,87 +102,56 @@ export const BAMBU_SWATCHES = [
   { name: "Walnut Wood", hex: "#78350f" },
 ];
 
-export const PATTERN_CARDS = [
-  {
-    id: "hex",
-    name: "Hexagon Mesh",
-    desc: "Lightweight airflow honeycomb grid",
-    icon: (
-      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-        <path d="M12 2l5.2 3v6L12 14l-5.2-3V5L12 2z" />
-        <path d="M6.8 11l5.2 3v6l-5.2 3-5.2-3v-6l5.2-3z" />
-        <path d="M17.2 11l5.2 3v6l-5.2 3-5.2-3v-6l5.2-3z" />
-      </svg>
-    ),
-  },
-  {
-    id: "voronoi",
-    name: "Voronoi Cells",
-    desc: "Organic cellular lattice geometry",
-    icon: (
-      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-        <polygon points="4,4 13,3 11,11 3,12" />
-        <polygon points="13,3 21,6 19,15 11,11" />
-        <polygon points="3,12 11,11 13,20 5,21" />
-        <polygon points="11,11 19,15 20,21 13,20" />
-      </svg>
-    ),
-  },
-  {
-    id: "waves",
-    name: "Sine Waves",
-    desc: "Flowing acoustic ribbon bands",
-    icon: (
-      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-        <path d="M2 8c3-4 6-4 9 0s6 4 11 0" />
-        <path d="M2 14c3-4 6-4 9 0s6 4 11 0" />
-        <path d="M2 20c3-4 6-4 9 0s6 4 11 0" />
-      </svg>
-    ),
-  },
-  {
-    id: "grid",
-    name: "Diamond Grid",
-    desc: "Crisp angled lattice cross-mesh",
-    icon: (
-      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-        <path d="M12 2l8 10-8 10L4 12 12 2z" />
-        <path d="M8 7l8 10M16 7L8 17" />
-      </svg>
-    ),
-  },
-  {
-    id: "solid",
-    name: "Solid Armor",
-    desc: "Clean, full dust & impact shield",
-    icon: (
-      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-        <rect x="5" y="2" width="14" height="20" rx="3" />
-        <rect x="8" y="5" width="4" height="4" rx="1" />
-      </svg>
-    ),
-  },
-  {
-    id: "text",
-    name: "Text Monogram",
-    desc: "Custom lettering with stencil bridges",
-    icon: (
-      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-        <path d="M4 7V4h16v3M9 20h6M12 4v16" />
-      </svg>
-    ),
-  },
-  {
-    id: "svg",
-    name: "Vector SVG Art",
-    desc: "Upload or pick vector emblem art",
-    icon: (
-      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-        <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
-      </svg>
-    ),
-  },
-];
+// Fallback icons for the pattern gallery (shown until, or instead of, the live thumbnail).
+const icon = (children) => (
+  <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+    {children}
+  </svg>
+);
+export const PATTERN_ICONS = {
+  solid: icon(<rect x="5" y="2" width="14" height="20" rx="3" />),
+  hex: icon(
+    <>
+      <path d="M12 2l5.2 3v6L12 14l-5.2-3V5L12 2z" />
+      <path d="M6.8 11l5.2 3v6l-5.2 3-5.2-3v-6l5.2-3z" />
+      <path d="M17.2 11l5.2 3v6l-5.2 3-5.2-3v-6l5.2-3z" />
+    </>
+  ),
+  dots: icon(
+    <>
+      <circle cx="7" cy="7" r="2.5" />
+      <circle cx="17" cy="7" r="2.5" />
+      <circle cx="12" cy="16" r="2.5" />
+    </>
+  ),
+  triangles: icon(<path d="M12 3l9 16H3L12 3zM7.5 11h9M12 19l-4.5-8M12 19l4.5-8" />),
+  grid: icon(
+    <>
+      <path d="M12 2l8 10-8 10L4 12 12 2z" />
+      <path d="M8 7l8 10M16 7L8 17" />
+    </>
+  ),
+  voronoi: icon(
+    <>
+      <polygon points="4,4 13,3 11,11 3,12" />
+      <polygon points="13,3 21,6 19,15 11,11" />
+      <polygon points="3,12 11,11 13,20 5,21" />
+      <polygon points="11,11 19,15 20,21 13,20" />
+    </>
+  ),
+  waves: icon(
+    <>
+      <path d="M2 8c3-4 6-4 9 0s6 4 11 0" />
+      <path d="M2 14c3-4 6-4 9 0s6 4 11 0" />
+      <path d="M2 20c3-4 6-4 9 0s6 4 11 0" />
+    </>
+  ),
+  chevron: icon(<path d="M2 9l5-5 5 5 5-5 5 5M2 16l5-5 5 5 5-5 5 5" />),
+  text: icon(<path d="M4 7V4h16v3M9 20h6M12 4v16" />),
+  svg: icon(
+    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+  ),
+};
 
 export const CALIBRATION_PROFILES = [
   {
@@ -221,9 +190,9 @@ export const CALIBRATION_PROFILES = [
 ];
 
 export const FINISH_MODES = [
-  { id: "through", label: "Through-Cut", desc: "Open vents & laser-ready profile" },
-  { id: "deboss", label: "Deboss", desc: "Recessed engraving on back face" },
-  { id: "inlay", label: "AMS Inlay", desc: "2-color flush 3MF insert" },
+  { id: "through", label: "Through-cut", desc: "Open holes. Also exports a laser-cut outline." },
+  { id: "deboss", label: "Deboss", desc: "Recessed into the back face." },
+  { id: "inlay", label: "Inlay", desc: "A second colour, flush with the back (multi-material 3MF)." },
 ];
 
 export const DEFAULT_VISIBLE = {

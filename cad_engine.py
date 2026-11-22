@@ -9,18 +9,20 @@ Design pose: see params.py docstring (z=0 = outer backplate face, phone at +Z).
 from __future__ import annotations
 
 import logging
-import math
 import time
 from pathlib import Path
 
-import numpy as np
-from build123d import (Axis, Box, Compound, Face, Location, Plane, Pos, RectangleRounded, Rot,
+from build123d import (Box, Circle, Compound, Face, Location, Plane, Pos, RectangleRounded, Rot,
                        Solid, Vector, Wire, export_step, export_stl)
-from shapely import affinity, voronoi_polygons
-from shapely.geometry import LineString, MultiPoint, MultiPolygon, Point, Polygon, box as sbox
+from shapely.geometry import Polygon
 from shapely.ops import unary_union
 
-from params import MIN_FLOOR, PATTERN_DEFAULT_PITCH, ParamError, Preset, wave_cos
+from params import ParamError, Preset
+# 2D geometry lives in patterns.py; re-exported here for existing callers (server, tests, CLI)
+from patterns import (Cell, _polys, camera_cutout_dims, camera_cutout_poly, check_through_cut,  # noqa: F401
+                      magsafe_pocket_poly, magsafe_ring_poly, pattern_cells, pattern_polys,
+                      plate_outline_poly, rrect_poly, svg_to_polys, text_to_polys,
+                      through_cut_connectivity, through_cut_material)
 from safe_ops import safe_chamfer, safe_corner_radius, safe_fillet
 
 log = logging.getLogger("casecraft")
@@ -49,14 +51,6 @@ def offset_frustum(p: Preset, d0: float, z0: float, d1: float, z1: float) -> Sol
         r = safe_corner_radius(p.body.corner_radius + d, w, l)
         return (Pos(0, 0, z) * RectangleRounded(w, l, max(r, 1e-3)).face()).outer_wire()
     return Solid.make_loft([wire(d0, z0), wire(d1, z1)], ruled=True)
-
-
-def rrect_poly(w: float, l: float, r: float, cx=0.0, cy=0.0) -> Polygon:
-    r = max(0.0, min(r, 0.499 * min(w, l)))
-    if r < 1e-3:
-        return sbox(cx - w / 2, cy - l / 2, cx + w / 2, cy + l / 2)
-    core = sbox(cx - w / 2 + r, cy - l / 2 + r, cx + w / 2 - r, cy + l / 2 - r)
-    return core.buffer(r, quad_segs=24)
 
 
 def _is_valid(s) -> bool:
@@ -208,28 +202,6 @@ def generate_frame(p: Preset) -> Solid:
 
 
 # ----------------------------------------------------------------------------- backplate
-def camera_cutout_dims(p: Preset):
-    c, s = p.camera, p.style
-    m = s.camera_cutout_margin
-    return c.width + 2 * m, c.height + 2 * m, c.radius + m
-
-
-def plate_outline_poly(p: Preset, offset: float) -> Polygon:
-    return rrect_poly(p.W + 2 * offset, p.L + 2 * offset, p.body.corner_radius + offset)
-
-
-def camera_cutout_poly(p: Preset) -> Polygon:
-    cx, cy = p.camera_center()
-    w, h, r = camera_cutout_dims(p)
-    return rrect_poly(w, h, r, cx, cy)
-
-
-def _polys(geom) -> list[Polygon]:
-    """Polygon parts (area > 0.5 mm2) of any shapely geometry."""
-    gs = list(geom.geoms) if hasattr(geom, "geoms") else [geom]
-    return [g for g in gs if g.geom_type == "Polygon" and g.area > 0.5]
-
-
 def _rr_wire(w, h, r, ox, oy, z):
     r = safe_corner_radius(r, w, h)
     return (Pos(ox, oy, z) * RectangleRounded(w, h, max(r, 0.05)).face()).outer_wire()
@@ -248,31 +220,6 @@ def camera_aperture_cutters(p: Preset, z_outer: float, z_base: float) -> list[So
     below = Pos(outer[3], outer[4], 0) * rrect_prism(outer[0], outer[1], outer[2], z_outer - 1.0, z_outer + EPS)
     above = rrect_prism(base[0], base[1], base[2], z_base - EPS, z_base + 1.0)
     return [below, loft, above]
-
-
-def magsafe_ring_poly(p: Preset) -> Polygon:
-    """Full MagSafe magnet ring footprint (54.4 mm OD, 45.6 mm ID + bottom alignment tail)."""
-    ring = Point(0.0, 0.0).buffer(27.2, quad_segs=48).difference(Point(0.0, 0.0).buffer(22.8, quad_segs=48))
-    tail = sbox(-2.4, -38.5, 2.4, -29.0)
-    return affinity.translate(ring.union(tail), 0.0, p.style.magsafe_offset_y)
-
-
-def magsafe_pocket_poly(p: Preset):
-    """Internal magnet ring pocket. A real magnet ring cannot be trimmed, so if the ring would
-    collide with the camera cutout or run within 2 mm of the plate edge this raises instead of
-    silently clipping the pocket."""
-    full = magsafe_ring_poly(p)
-    edge_keep = plate_outline_poly(p, p.plate_body_offset).buffer(-2.0)
-    cam_keepout = camera_cutout_poly(p).buffer(1.5)
-    pocket = full.intersection(edge_keep).difference(cam_keepout)
-    lost = full.area - pocket.area
-    if lost > 0.005 * full.area:
-        where = "camera cutout" if full.intersects(cam_keepout) else "backplate edge"
-        raise ParamError(
-            f"MagSafe ring overlaps the {where} ({100 * lost / full.area:.0f}% of the ring would be cut away). "
-            f"Shift it with style.magsafe_offset_y (currently {p.style.magsafe_offset_y:g} mm; "
-            f"negative moves it towards the bottom) to match your phone's charging coil.")
-    return pocket
 
 
 def generate_backplate(p: Preset, with_pattern: bool = True):
@@ -311,243 +258,8 @@ def generate_backplate(p: Preset, with_pattern: bool = True):
 
 
 # ----------------------------------------------------------------------------- patterns
-def _hex_polys(region: Polygon, pitch: float, web: float) -> list[Polygon]:
-    """Flat-top-agnostic hex grid, clipped (2D) to region. pitch = centre spacing."""
-    flat = pitch - web                      # flat-to-flat
-    R = flat / math.sqrt(3)                 # circumradius
-    minx, miny, maxx, maxy = region.bounds
-    dx, dy = pitch, pitch * math.sqrt(3) / 2
-    base = Polygon([(R * math.cos(math.radians(60 * k + 30)), R * math.sin(math.radians(60 * k + 30)))
-                    for k in range(6)])  # pointy-top hex
-    out = []
-    row = 0
-    y = miny - dy
-    while y < maxy + dy:
-        x = minx - dx + (dx / 2 if row % 2 else 0)
-        while x < maxx + dx:
-            hx = affinity.translate(base, x, y)
-            if region.intersects(hx):
-                clipped = region.intersection(hx)
-                if not clipped.is_empty and clipped.area >= 0.35 * base.area:
-                    out.extend(list(clipped.geoms) if hasattr(clipped, "geoms") else [clipped])
-            x += dx
-        y += dy
-        row += 1
-    return out
-
-
-def svg_to_polys(svg: str | Path, target_w: float, target_h: float, samples: int = 24) -> list[Polygon]:
-    """Parse SVG (path string, file path or markup) -> shapely polygons centred on origin, fitted
-    into target box. Even-odd fill for holes; y flipped (SVG y is down)."""
-    from svgelements import SVG, Path as SPath, Shape
-    import io
-    src = svg
-    if isinstance(src, Path) or (isinstance(src, str) and len(src) < 260 and Path(src).exists()):
-        doc = SVG.parse(str(src))
-    else:
-        doc = SVG.parse(io.StringIO(src))
-    rings = []
-    for el in doc.elements():
-        if isinstance(el, Shape):
-            path = SPath(el)
-            path.reify()
-            for sub in path.as_subpaths():
-                sp = SPath(sub)
-                n = max(samples * len(sp), 8)
-                pts = [sp.point(t / n) for t in range(n + 1)]
-                pts = [(pt.x, -pt.y) for pt in pts if pt is not None]
-                if len(pts) >= 4:
-                    poly = Polygon(pts).buffer(0)
-                    if not poly.is_empty and poly.area > 1e-6:
-                        rings.append(poly)
-    if not rings:
-        raise ValueError("SVG contained no usable shapes")
-    # even-odd: XOR all rings
-    geom = rings[0]
-    for r in rings[1:]:
-        geom = geom.symmetric_difference(r)
-    minx, miny, maxx, maxy = geom.bounds
-    k = min(target_w / (maxx - minx), target_h / (maxy - miny))
-    geom = affinity.translate(geom, -(minx + maxx) / 2, -(miny + maxy) / 2)
-    geom = affinity.scale(geom, k, k, origin=(0, 0))
-    return list(geom.geoms) if isinstance(geom, MultiPolygon) else [geom]
-
-
-def text_to_polys(text: str, target_w: float, target_h: float, font: str = "Arial",
-                  font_size: float = 10.0, bold: bool = False) -> list[Polygon]:
-    """build123d native Text() sketch -> sampled wires -> shapely polygons (centred, fitted)."""
-    from build123d import FontStyle, Text
-    style = FontStyle.BOLD if bold else FontStyle.REGULAR
-    txt = Text(text, font_size, font=font, font_style=style)
-    polys = []
-    for face in txt.faces():
-        def ring(wire, n_per_edge=24):
-            pts = []
-            for e in wire.edges():
-                for i in range(n_per_edge):
-                    q = e.position_at(i / n_per_edge)
-                    pts.append((q.X, q.Y))
-            return pts
-        outer = ring(face.outer_wire())
-        holes = [ring(w) for w in face.inner_wires()]
-        poly = Polygon(outer, holes).buffer(0)
-        if not poly.is_empty:
-            polys.append(poly)
-    if not polys:
-        raise ValueError(f"Text produced no geometry (font '{font}' missing?)")
-    geom = unary_union(polys)
-    minx, miny, maxx, maxy = geom.bounds
-    k = min(target_w / (maxx - minx), target_h / (maxy - miny))
-    geom = affinity.translate(geom, -(minx + maxx) / 2, -(miny + maxy) / 2)
-    geom = affinity.scale(geom, k, k, origin=(0, 0))
-    return list(geom.geoms) if isinstance(geom, MultiPolygon) else [geom]
-
-
-def _voronoi_polys(region: Polygon, pitch: float, web: float, seed: int = 42) -> list[Polygon]:
-    """Jittered Voronoi cells, inset by web/2 and clipped in 2D to region."""
-    rng = np.random.default_rng(int(seed))
-    minx, miny, maxx, maxy = region.bounds
-    xs = np.arange(minx - pitch, maxx + pitch * 1.5, pitch)
-    ys = np.arange(miny - pitch, maxy + pitch * 1.5, pitch)
-    pts = []
-    for y in ys:
-        for x in xs:
-            pts.append((float(x + rng.uniform(-0.35, 0.35) * pitch),
-                        float(y + rng.uniform(-0.35, 0.35) * pitch)))
-    vp = voronoi_polygons(MultiPoint(pts), extend_to=region.envelope.buffer(pitch * 2))
-    out = []
-    for cell in vp.geoms:
-        shrunk = cell.buffer(-web / 2, join_style=2)
-        if shrunk.is_empty or not region.intersects(shrunk):
-            continue
-        clipped = region.intersection(shrunk)
-        for g in (clipped.geoms if hasattr(clipped, "geoms") else [clipped]):
-            if g.geom_type == "Polygon" and g.area >= 1.5:
-                out.append(g)
-    return out
-
-
-def _grid_polys(region: Polygon, pitch: float, web: float, angle: float = 45.0) -> list[Polygon]:
-    """Rotated square/diamond lattice clipped in 2D."""
-    cell = max(1.0, pitch - web)
-    minx, miny, maxx, maxy = region.bounds
-    span = math.hypot(maxx - minx, maxy - miny) / 2 + pitch * 2
-    cx, cy = (minx + maxx) / 2, (miny + maxy) / 2
-    out = []
-    min_area = 0.35 * (cell ** 2)
-    y = cy - span
-    while y <= cy + span:
-        x = cx - span
-        while x <= cx + span:
-            sq = sbox(x - cell / 2, y - cell / 2, x + cell / 2, y + cell / 2)
-            if abs(angle) > 1e-3:
-                sq = affinity.rotate(sq, angle, origin=(cx, cy))
-            if region.intersects(sq):
-                clipped = region.intersection(sq)
-                for g in (clipped.geoms if hasattr(clipped, "geoms") else [clipped]):
-                    if g.geom_type == "Polygon" and g.area >= min_area:
-                        out.append(g)
-            x += pitch
-        y += pitch
-    return out
-
-
-def _wave_polys(region: Polygon, pitch: float, web: float, amplitude: float = 3.5, wavelength: float = 28.0) -> list[Polygon]:
-    """Sinusoidal ribbon cutouts buffered and clipped in 2D.
-    Bands repeat every `pitch` mm vertically, but the rib between them is measured perpendicular
-    to the curve: at the steepest point it shrinks by cos(theta_max), so the slot width is sized
-    from that worst case to keep every rib >= `web` (it used to drop to ~0.1 mm)."""
-    half_slot = max(0.5, (pitch * wave_cos(amplitude, wavelength) - web) / 2)
-    minx, miny, maxx, maxy = region.bounds
-    xs = np.linspace(minx - pitch, maxx + pitch, 24)
-    out = []
-    y0 = miny - amplitude - pitch
-    while y0 <= maxy + amplitude + pitch:
-        pts = [(float(x), float(y0 + amplitude * math.sin(2 * math.pi * x / max(wavelength, 6.0)))) for x in xs]
-        band = LineString(pts).buffer(half_slot, cap_style=2, quad_segs=4)
-        if region.intersects(band):
-            clipped = region.intersection(band).simplify(0.15, preserve_topology=True)
-            for g in (clipped.geoms if hasattr(clipped, "geoms") else [clipped]):
-                if g.geom_type == "Polygon" and g.area >= 2.0:
-                    out.append(g)
-        y0 += pitch
-    return out
-
-
-def _apply_stencil_bridges(polys: list[Polygon], bridge_w: float = 1.4) -> list[Polygon]:
-    """Cut narrow vertical bridges across interior rings so through-cut counters stay anchored."""
-    out = []
-    for g in polys:
-        if len(g.interiors) == 0:
-            out.append(g)
-            continue
-        minx, miny, maxx, maxy = g.bounds
-        cur = g
-        for ir in g.interiors:
-            cx, _ = Polygon(ir).centroid.coords[0]
-            bar = sbox(cx - bridge_w / 2, miny - 1.0, cx + bridge_w / 2, maxy + 1.0)
-            cur = cur.difference(bar)
-        for piece in (cur.geoms if hasattr(cur, "geoms") else [cur]):
-            if piece.geom_type == "Polygon" and piece.area > 0.5:
-                out.append(piece)
-    return out
-
-
-def pattern_polys(p: Preset) -> list[Polygon]:
-    pat = p.pattern
-    if pat.type == "solid":
-        return []
-    region = plate_outline_poly(p, p.plate_body_offset).buffer(-pat.margin)
-    region = region.difference(camera_cutout_poly(p).buffer(pat.margin))
-    if (p.style.magsafe_ring and pat.mode in ("deboss", "inlay")
-            and p.bp_t - pat.depth - p.style.magsafe_depth < MIN_FLOOR):
-        # Outer-face recess + inner-face magnet pocket would meet in a too-thin (or holed) skin:
-        # keep the pattern off the pocket footprint, plus one web of wall around it.
-        # (coarse outline: the 48-segment ring arcs otherwise bloat every clipped cell's B-rep)
-        keepout = magsafe_pocket_poly(p).buffer(pat.web, quad_segs=6).simplify(0.05)
-        region = region.difference(keepout)
-    pitch = float(pat.params.get("pitch", PATTERN_DEFAULT_PITCH.get(pat.type, 0.0)))
-    if pat.type == "hex":
-        return _hex_polys(region, pitch, pat.web)
-    if pat.type == "voronoi":
-        return _voronoi_polys(region, pitch, pat.web, int(pat.params.get("seed", 42)))
-    if pat.type == "grid":
-        return _grid_polys(region, pitch, pat.web, float(pat.params.get("angle", 45.0)))
-    if pat.type == "waves":
-        return _wave_polys(region, pitch, pat.web,
-                           float(pat.params.get("amplitude", 3.5)),
-                           float(pat.params.get("wavelength", 28.0)))
-    if pat.type == "svg":
-        minx, miny, maxx, maxy = region.bounds
-        size = float(pat.params.get("size", 0.8))
-        polys = svg_to_polys(pat.params["svg"], (maxx - minx) * size, (maxy - miny) * size)
-        polys = [affinity.scale(g, -1, 1, origin=(0, 0)) for g in polys]  # read correctly from the OUTER face
-        ox, oy = pat.params.get("offset", (0.0, 0.0))
-        polys = [affinity.translate(g, ox, oy) for g in polys]
-        clipped = unary_union(polys).intersection(region)
-        res = list(clipped.geoms) if hasattr(clipped, "geoms") else ([] if clipped.is_empty else [clipped])
-        if pat.mode == "through" and pat.stencil_bridges:
-            res = _apply_stencil_bridges(res)
-        return res
-    if pat.type == "text":
-        minx, miny, maxx, maxy = region.bounds
-        size = float(pat.params.get("size", 0.7))
-        polys = text_to_polys(pat.params.get("text", "TEXT"), (maxx - minx) * size, (maxy - miny) * size,
-                              pat.params.get("font", "Arial"), float(pat.params.get("font_size", 10.0)),
-                              bool(pat.params.get("bold", True)))
-        rot = float(pat.params.get("rotation", 0.0))
-        polys = [affinity.rotate(g, rot, origin=(0, 0)) for g in polys]
-        polys = [affinity.scale(g, -1, 1, origin=(0, 0)) for g in polys]  # read correctly from the OUTER face
-        ox, oy = pat.params.get("offset", (0.0, 0.0))
-        polys = [affinity.translate(g, ox, oy) for g in polys]
-        clipped = unary_union(polys).intersection(region)
-        res = list(clipped.geoms) if hasattr(clipped, "geoms") else ([] if clipped.is_empty else [clipped])
-        if pat.mode == "through" and pat.stencil_bridges:
-            res = _apply_stencil_bridges(res)
-        return res
-    raise ValueError(pat.type)
-
-
+# The 2D pattern library (generators, border/rounding finishing, connectivity, text/SVG)
+# lives in patterns.py; this module turns its cut-outs into B-rep.
 def _poly_to_face(poly: Polygon) -> Face:
     def wire(coords):
         pts = [Vector(x, y, 0) for x, y in list(coords)[:-1]]
@@ -555,71 +267,37 @@ def _poly_to_face(poly: Polygon) -> Face:
     return Face(wire(poly.exterior.coords), [wire(i.coords) for i in poly.interiors])
 
 
-_ISLAND_HINT = {
-    "text": "Enable stencil bridges, use a bolder font/larger size, or switch to deboss or inlay.",
-    "svg": "Enable stencil bridges, remove enclosed shapes from the SVG, or switch to deboss or inlay.",
-}
+def _cell_face(c: Cell, shrink: float = 0.0) -> Face | None:
+    """B-rep face of one cut-out (optionally shrunk, for inlay clearance). Exact circles become
+    true circles: one cylindrical side face instead of dozens of facets."""
+    if c.circle is not None:
+        x, y, r = c.circle
+        r -= shrink
+        return Pos(x, y, 0) * Circle(r).face() if r > 0.05 else None
+    if shrink <= 0:
+        return _poly_to_face(c.poly)
+    return [_poly_to_face(g) for g in _parts_of(c.poly.buffer(-shrink))
+            if g.geom_type == "Polygon" and g.area > 0.1] or None
 
 
-def through_cut_material(p: Preset, polys: list[Polygon]):
-    """2D backplate material left after a through-cut (plate outline - camera cutout - pattern)."""
-    base = plate_outline_poly(p, p.plate_body_offset).difference(camera_cutout_poly(p))
-    return base.difference(unary_union(polys)) if polys else base
-
-
-def through_cut_connectivity(p: Preset, polys: list[Polygon] | None = None) -> dict:
-    """Connectivity of a through-cut backplate, computed in 2D (cheap, exact for prismatic cuts).
-
-    Openings are holes in ONE material region; detached solids are extra material regions that
-    would fall out of the print. Returns {"islands": [(area, (x, y)), ...] (detached pieces,
-    largest first), "thin_necks": n regions joined only by ligaments < MIN_PATTERN_WEB}."""
-    from params import MIN_PATTERN_WEB
-    if polys is None:
-        polys = [g for g in pattern_polys(p) if g.area > 0.5 and g.geom_type == "Polygon"]
-    regions = sorted(_polys(through_cut_material(p, polys)), key=lambda g: -g.area)
-    islands = [(round(g.area, 1), tuple(round(v, 1) for v in g.representative_point().coords[0]))
-               for g in regions[1:]]
-    thin = 0
-    if regions:
-        eroded = [g for g in _polys(regions[0].buffer(-MIN_PATTERN_WEB / 2)) if g.area > 2.0]
-        thin = max(0, len(eroded) - 1)
-    return {"islands": islands, "thin_necks": thin}
-
-
-def _check_through_cut(p: Preset, polys: list[Polygon]) -> None:
-    conn = through_cut_connectivity(p, polys)
-    isl = conn["islands"]
-    if not isl:
-        if conn["thin_necks"]:
-            log.warning("through-cut leaves regions joined by ligaments thinner than one extrusion width")
-        return
-    area, (x, y) = isl[0]
-    hint = _ISLAND_HINT.get(p.pattern.type,
-                            "Increase the material web width, increase the pattern margin, or switch to deboss.")
-    if p.pattern.type in _ISLAND_HINT and p.pattern.stencil_bridges:
-        hint = hint.replace("Enable stencil bridges, ", "")
-    raise ParamError(
-        f"Your through-cut {p.pattern.type} pattern creates {len(isl)} disconnected region"
-        f"{'s' if len(isl) != 1 else ''} that would fall out of the backplate (largest {area:g} mm2 "
-        f"at x={x:g}, y={y:g} mm from the plate centre, front view). {hint}")
+def _parts_of(geom) -> list:
+    return [] if geom.is_empty else (list(geom.geoms) if hasattr(geom, "geoms") else [geom])
 
 
 def apply_backplate_pattern(plate: Solid, p: Preset):
-    """2D boolean first (shapely), then ONE extrusion batch + ONE cut. Returns (plate, inlay).
+    """2D first (patterns.py), then ONE extrusion batch + ONE cut. Returns (plate, inlay).
     Through-cuts that would detach material are rejected (ParamError) before any 3D work."""
     pat = p.pattern
-    polys = [g for g in pattern_polys(p) if g.area > 0.5 and g.geom_type == "Polygon"]
-    if not polys:
+    cells = pattern_cells(p)
+    if not cells:
         return plate, None
     if pat.mode == "through":
-        _check_through_cut(p, polys)
+        check_through_cut(p, [c.poly for c in cells])
     if pat.mode == "through":
         z0, h = -1.0, p.bp_t + 2.0
     else:
         z0, h = -1.0, pat.depth + 1.0           # cutter starts below outer face, depth = pat.depth
-    tools = []
-    for g in polys:
-        tools.append(Pos(0, 0, z0) * Solid.extrude(_poly_to_face(g), Vector(0, 0, h)))
+    tools = [Pos(0, 0, z0) * Solid.extrude(_cell_face(c), Vector(0, 0, h)) for c in cells]
     cutter = Compound(tools)
     result = plate.cut(cutter).clean()
     if not _is_valid(result):
@@ -630,13 +308,12 @@ def apply_backplate_pattern(plate: Solid, p: Preset):
                          "Increase the material web width, enable stencil bridges, or switch to deboss.")
     inlay = None
     if pat.mode == "inlay":
-        shrunk = []
-        for g in polys:
-            sg = g.buffer(-p.sc / 2)
-            if not sg.is_empty:
-                shrunk.extend(list(sg.geoms) if hasattr(sg, "geoms") else [sg])
-        inl = [Solid.extrude(_poly_to_face(sg), Vector(0, 0, pat.depth))
-               for sg in shrunk if sg.geom_type == "Polygon" and sg.area > 0.1]
+        faces = []
+        for c in cells:
+            f = _cell_face(c, shrink=p.sc / 2)
+            if f is not None:
+                faces.extend(f if isinstance(f, list) else [f])
+        inl = [Solid.extrude(f, Vector(0, 0, pat.depth)) for f in faces]
         inlay = Compound(inl) if inl else None
     return result, inlay
 

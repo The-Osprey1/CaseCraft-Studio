@@ -144,6 +144,42 @@ def test_default_lattices_are_connected(ptype):
     assert conn["islands"] == [] and conn["thin_necks"] == 0, conn
 
 
+@pytest.mark.parametrize("ptype", ["dots", "triangles", "chevron"])
+@pytest.mark.parametrize("mode", ["through", "deboss", "inlay"])
+def test_new_pattern_types_build_valid_plates(ptype, mode):
+    p = _preset("iphone_16_pro", ptype, mode)
+    plate, inlay = ce.generate_backplate(p)
+    sr = verify.solid_report(plate)
+    assert sr["valid"] and sr["solids"] == 1 and sr["shells"] == 1, sr
+    assert plate.volume < ce.generate_backplate(p, with_pattern=False).volume
+    if mode == "inlay":
+        assert inlay is not None and inlay.volume > 0
+        assert verify.overlap_volume(inlay, plate) < 0.01          # inlay sits in the pockets
+    else:
+        assert inlay is None
+
+
+def test_dots_are_cut_with_true_cylinders():
+    """Exact circles: one cylindrical wall per hole, not dozens of facets (and ~40x faster)."""
+    p = _preset("iphone_15_pro", "dots", "through")
+    p.pattern.edge = "whole"
+    n = len(ce.pattern_cells(p))
+    plate, _ = ce.generate_backplate(p)
+    walls = [f for f in plate.faces() if f.geom_type.name == "CYLINDER"]
+    assert len(walls) >= n
+    assert len(plate.faces()) <= len(ce.generate_backplate(p, with_pattern=False).faces()) + 2 * n + 4
+
+
+def test_rounded_whole_hex_plate_and_unibody_are_one_piece():
+    p = _preset("iphone_15_pro", "hex", "through")
+    p.pattern.edge, p.pattern.corner_radius = "whole", 1.0
+    p.validate()
+    plate, _ = ce.generate_backplate(p)
+    sr = verify.solid_report(plate)
+    assert sr["valid"] and sr["solids"] == 1, sr
+    verify.assert_one_piece(ce.generate_unibody(p), "rounded whole-cell hex unibody")
+
+
 def test_api_rejects_disconnected_pattern():
     from fastapi.testclient import TestClient
     from server import app

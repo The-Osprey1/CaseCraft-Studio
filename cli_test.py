@@ -1,6 +1,8 @@
 """Headless verification gate: build a full set (or a fit-test coupon) and validate the outputs.
-Usage: python cli_test.py [--preset iphone_15_pro] [--pattern solid|hex|voronoi|grid|waves|svg|text]
-                          [--mode through|deboss|inlay] [--magsafe] [--printer generic_256|bambu_h3c]
+Usage: python cli_test.py [--preset iphone_15_pro]
+                          [--pattern solid|hex|dots|triangles|grid|voronoi|waves|chevron|svg|text]
+                          [--mode through|deboss|inlay] [--edge clip|whole|fade] [--corner-radius MM]
+                          [--magsafe] [--printer generic_256|bambu_h3c]
                           [--coupon [--coupon-type camera|buttons|ports]] [--out out]
 Exit codes: 0 all checks passed, 1 a check failed, 2 the design itself is invalid (same message as HTTP 422).
 """
@@ -48,14 +50,20 @@ def check_3mf(path, printer, res):
     return rep
 
 
-def run(preset_id, pattern, mode, out, magsafe=False, printer=None, perf_budget=1.5):
+def run(preset_id, pattern, mode, out, magsafe=False, printer=None, perf_budget=1.5, edge=None,
+        corner_radius=None):
     p = Preset.load(preset_id)
     p.pattern.type, p.pattern.mode = pattern, mode
+    if edge is not None:
+        p.pattern.edge = edge
+    if corner_radius is not None:
+        p.pattern.corner_radius = corner_radius
     p.style.magsafe_ring = magsafe
     if pattern == "svg":
         p.pattern.params = {"svg": STAR_SVG, "size": 0.5}
     elif pattern == "text":
         p.pattern.params = {"text": "CASECRAFT", "size": 0.65, "font": "Arial", "bold": True}
+    p.validate()                          # an invalid combination exits 2, like HTTP 422
     res = []
     t0 = time.perf_counter()
     from printers import get_printer
@@ -65,7 +73,7 @@ def run(preset_id, pattern, mode, out, magsafe=False, printer=None, perf_budget=
     print(f"\nTimings (s): {r['timings']}  total={total:.2f}")
     # Wall-clock budget: machine-dependent, so CI (shared, noisy runners) passes a looser
     # --perf-budget; it still catches real slow-downs. 0 disables the check.
-    if pattern in ("voronoi", "grid", "waves", "hex") and perf_budget > 0:
+    if pattern in ("voronoi", "grid", "waves", "hex", "dots", "triangles", "chevron") and perf_budget > 0:
         check(r["timings"]["backplate"] < perf_budget,
               f"{pattern} backplate generated in {r['timings']['backplate']:.3f}s (< {perf_budget:g}s)", res)
     if pattern == "text" and mode == "through" and p.pattern.stencil_bridges:
@@ -208,6 +216,9 @@ if __name__ == "__main__":
     ap.add_argument("--preset", default="iphone_15_pro")
     ap.add_argument("--pattern", default="hex")
     ap.add_argument("--mode", default="through")
+    ap.add_argument("--edge", default=None, choices=["clip", "whole", "fade"],
+                    help="lattice border: clip (default), whole cells only, or fade")
+    ap.add_argument("--corner-radius", type=float, default=None, help="round the cut-out corners (mm)")
     ap.add_argument("--out", default="out")
     ap.add_argument("--coupon", action="store_true")
     ap.add_argument("--magsafe", action="store_true")
@@ -223,7 +234,7 @@ if __name__ == "__main__":
             results = run_coupon(a.preset, a.out, a.coupon_type, a.printer)
         else:
             results, timings = run(a.preset, a.pattern, a.mode, a.out, magsafe=a.magsafe, printer=a.printer,
-                                   perf_budget=a.perf_budget)
+                                   perf_budget=a.perf_budget, edge=a.edge, corner_radius=a.corner_radius)
             results += stress()
     except ParamError as exc:            # same message the API returns as HTTP 422
         print(f"INVALID DESIGN: {exc}")

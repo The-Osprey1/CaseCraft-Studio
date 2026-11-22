@@ -23,7 +23,15 @@ Supports **4-part modular snap-fit printing** (single-extruder and AMS printers)
   - an inlay becomes a deboss
 
 ### 2. Pattern Engine & Laser Export
-- **7 Pattern Types:** `solid`, `hex`, `voronoi`, `waves`, `grid`, `text` (native `build123d` `Text()`), `svg`.
+- **10 Pattern Types:**
+  - lattices: `hex`, `dots`, `triangles`, `grid` (diamond grid), `voronoi` (with a seed and relaxation)
+  - stripes: `waves` (sine), `chevron` (zig-zag)
+  - emblems: `text` (native `build123d` `Text()`, with font, bold and rotation), `svg` (with rotation)
+  - `solid`
+- **Pattern finishing:**
+  - `edge` sets how a lattice meets the border of the patterned area: `clip` (cells cut at the border, the default, so saved designs build unchanged), `whole` (only complete cells, leaving a solid border) or `fade` (cells shrink towards the border over `fade_width` mm).
+  - `corner_radius` (0–5 mm) rounds every convex cut-out corner of lattices and stripes. It can only shrink a cut-out, so connectivity can only improve.
+- **Instant 2D preview:** all 2D pattern geometry lives in `patterns.py` (Shapely). `/api/pattern-preview` and `/api/pattern-gallery` return back-view SVG paths without waiting for the CAD lock, so the UI shows the cut-out count, open area and connectivity in milliseconds while the 3D model rebuilds. The UI builds its pattern controls from `/api/patterns`.
 - **3 Extrusion Modes:**
   - `through`: open vents
   - `deboss`: recessed back-face engraving
@@ -139,6 +147,7 @@ python -m pytest                         # full: + B-rep generation, exports, fi
 # Headless CLI gate (exit 0 pass, 1 check failed, 2 invalid design)
 python cli_test.py --preset iphone_16_pro --pattern voronoi --mode through --magsafe --out out/voronoi
 python cli_test.py --preset iphone_15_pro --pattern hex --mode inlay --printer bambu_h3c --out out/h3c
+python cli_test.py --preset iphone_15_pro --pattern voronoi --edge fade --corner-radius 1.5 --out out/fade
 python cli_test.py --preset iphone_16_pro --coupon --coupon-type buttons --out out/coupon
 
 # Independent 3MF validation (+ lib3mf strict mode when installed)
@@ -156,6 +165,7 @@ GitHub Actions (`.github/workflows/ci.yml`) runs:
 ```text
 casecraft/
 ├── cad_engine.py          # build123d generators: frame, backplate, ring, buttons, unibody, coupons, export
+├── patterns.py            # 2D plate geometry + pattern library (Shapely): cells, edge modes, connectivity, UI previews
 ├── params.py              # preset dataclasses, derived dims; Preset.check() = the single source of validation rules
 ├── printers.py            # minimal printer profiles (plate size, slots, toolchanger)
 ├── bambu_3mf.py           # zero-dependency multi-part/multi-extruder 3MF writer + shared plate layout
@@ -164,7 +174,7 @@ casecraft/
 ├── print_in_place.py      # co-printed part relationships + directional gap probes (experimental)
 ├── dfm.py                 # overhang/bridge DFM analyzer on Z-up print meshes
 ├── safe_ops.py            # clamped fillet/chamfer guards for OpenCascade stability
-├── server.py              # FastAPI API (/presets, /user-presets, /printers, /generate-preview, /export-zip, /export-part)
+├── server.py              # FastAPI API (/presets, /user-presets, /printers, /patterns, /pattern-preview, /generate-preview, /export-zip, /export-part)
 ├── appdirs.py             # bundled-resource vs per-user paths (works frozen), atomic writes
 ├── projects.py            # .casecraft project files + recent list
 ├── version.py             # single version number

@@ -26,6 +26,8 @@ MIN_FLOOR = 0.6           # thinnest backplate skin left under a deboss/inlay or
 MAX_TEXT_LEN = 64
 MAX_FONT_LEN = 64
 MIN_WALL = 1.0            # thinnest TPU side wall accepted
+OPEN_CUTOUT_MIN_STRIP = 3.0   # camera.ring = False: thinner backplate strips beside the cut-out are removed
+MAX_NAME_LEN = 80
 PATTERN_TYPES = ("solid", "hex", "voronoi", "grid", "waves", "svg", "text", "dots", "triangles", "chevron")
 PATTERN_MODES = ("through", "deboss", "inlay")
 # How lattice patterns meet the border of the patterned area: clip (cells cut at the border, the
@@ -114,12 +116,22 @@ class CameraOpening:
 
 @dataclass
 class Camera:
+    """The raised camera island on the phone's back (its footprint at the BASE, back view).
+
+    ring = True: the backplate gets a cut-out (island + style.camera_cutout_margin) and a separate
+    press-fit camera ring with a raised protective bezel fills it.
+    ring = False ("open cut-out"): no ring; the backplate just clears the island by
+    style.camera_aperture_margin + clearances.camera_ring_clearance. The cut-out may run through
+    the backplate edge (any strip narrower than OPEN_CUTOUT_MIN_STRIP left beside it is removed),
+    so it also describes islands that hug the phone edge and full-width camera plateaus
+    (x = y = 0, width = body width, height = how far the plateau reaches down the back)."""
     x: float = 3.5
     y: float = 3.5
     width: float = 36.0       # island at its base (phone back)
     height: float = 38.0
     radius: float = 9.0
     opening: CameraOpening | None = None   # optional outer-face profile (see CameraOpening)
+    ring: bool = True
 
 
 @dataclass
@@ -210,6 +222,8 @@ class Verification:
 class Preset:
     id: str = "custom"
     name: str = "Custom"
+    brand: str = ""              # device maker, for the UI's brand-first device picker ("" = other)
+    year: int = 0                # release year (newest first in the picker; 0 = unknown)
     body: Body = field(default_factory=Body)
     camera: Camera = field(default_factory=Camera)
     buttons: list[Button] = field(default_factory=list)
@@ -225,9 +239,18 @@ class Preset:
         if not isinstance(d, dict):
             raise ParamError(f"Preset: expected a JSON object, got {type(d).__name__}")
         d = dict(d)
+        for key in ("buttons", "ports"):
+            items = d.get(key, [])
+            if not (isinstance(items, list) and all(isinstance(x, dict) for x in items)):
+                raise ParamError(f"Preset: {key} must be a list of objects")
+        for key in ("body", "camera", "clearances", "style", "pattern", "verification"):
+            if d.get(key) is not None and not isinstance(d[key], dict):
+                raise ParamError(f"Preset: {key} must be an object")
         p = cls(
             id=d.pop("id", "custom"),
             name=d.pop("name", "Custom"),
+            brand=d.pop("brand", ""),
+            year=d.pop("year", 0),
             body=_build(Body, d.pop("body", None)),
             camera=_build_camera(d.pop("camera", None)),
             buttons=[_build(Button, b) for b in d.pop("buttons", [])],
@@ -408,7 +431,9 @@ class Preset:
             if reach > half:
                 errs.append(f"port {pt.id} extends past the end of the {pt.side} edge")
             elif reach > half - b.corner_radius:
-                warns.append(f"port {pt.id} runs into the rounded corner of the {pt.side} edge")
+                warns.append(f"port {pt.id} runs into the rounded corner of the {pt.side} edge: the opening cuts the "
+                             "curved wall at an angle and its roof may need support; move it towards the middle "
+                             "or make it narrower")
             if pt.height / 2 + abs(pt.z_offset) > b.thickness / 2 + self.o:
                 errs.append(f"port {pt.id} opening cuts into the screen lip or backplate groove "
                             "(reduce height or z_offset)")
@@ -428,16 +453,28 @@ class Preset:
         cam = self.camera
         if cam.width <= 0 or cam.height <= 0 or cam.radius < 0:
             errs.append("camera width/height must be > 0 and radius >= 0")
-        else:
+        elif cam.ring:
             cx, cy = self.camera_center()
             m = s.camera_cutout_margin
             bz = s.camera_bezel_width
             if abs(cx) + cam.width / 2 + m + bz > b.width / 2 - 0.3 or abs(cy) + cam.height / 2 + m + bz > b.length / 2 - 0.3:
-                errs.append("camera island (with margin) plus bezel must stay inside the phone outline")
+                errs.append("camera island (with margin) plus the camera-ring bezel must stay inside the phone outline; "
+                            "for an island that reaches the edge (or a full-width camera plateau) switch the camera "
+                            "mount to an open cut-out (camera.ring = false)")
             if cam.opening is not None:
                 e, w = self._camera_opening_rules()
                 errs += e
                 warns += w
+        else:
+            cx, cy = self.camera_center()
+            tol = 0.05
+            if abs(cx) + cam.width / 2 > b.width / 2 + tol or abs(cy) + cam.height / 2 > b.length / 2 + tol:
+                errs.append("camera island must lie within the phone outline (x/y measured from the back view's "
+                            "top-left corner)")
+            elif cam.width * cam.height > 0.5 * b.width * b.length:
+                errs.append("camera island covers more than half of the phone back; the backplate would be too small")
+            if cam.opening is not None:
+                warns.append("camera.opening only shapes the camera ring; it is ignored with an open camera cut-out")
         # -- MagSafe, pattern
         if s.magsafe_ring and (s.backplate_thickness - s.magsafe_depth < 0.7 or s.magsafe_depth <= 0):
             errs.append("magsafe_depth must leave >= 0.7 mm backplate floor")
@@ -501,6 +538,14 @@ class Preset:
         """Every numeric field must be a finite number and every flag a bool, whatever the source
         (JSON, form input, CLI). Catches NaN/inf/strings before any geometry is attempted."""
         errs = []
+        for key in ("id", "name", "brand"):
+            v = getattr(self, key)
+            if not isinstance(v, str):
+                errs.append(f"{key} must be a string")
+            elif len(v) > (64 if key == "id" else MAX_NAME_LEN):
+                errs.append(f"{key} must be at most {64 if key == 'id' else MAX_NAME_LEN} characters")
+        if not (isinstance(self.year, int) and not isinstance(self.year, bool) and 0 <= self.year <= 2100):
+            errs.append("year must be a whole number (0 = unknown)")
         groups = [("body", self.body), ("camera", self.camera), ("clearances", self.clearances),
                   ("style", self.style), ("pattern", self.pattern)]
         groups += [(f"buttons[{i}]", bt) for i, bt in enumerate(self.buttons)]

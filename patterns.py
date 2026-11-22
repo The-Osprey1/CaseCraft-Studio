@@ -41,8 +41,8 @@ from shapely import affinity, voronoi_polygons
 from shapely.geometry import LineString, MultiPoint, MultiPolygon, Point, Polygon, box as sbox
 from shapely.ops import unary_union
 
-from params import (MIN_FLOOR, MIN_PATTERN_WEB, PATTERN_DEFAULT_PITCH, STRIPE_SHAPES, ParamError,
-                    Preset, stripe_cos)
+from params import (MIN_FLOOR, MIN_PATTERN_WEB, OPEN_CUTOUT_MIN_STRIP, PATTERN_DEFAULT_PITCH, STRIPE_SHAPES,
+                    ParamError, Preset, stripe_cos)
 
 log = logging.getLogger("casecraft")
 LATTICE_TYPES = ("hex", "dots", "triangles", "grid", "voronoi")
@@ -73,10 +73,42 @@ def camera_cutout_dims(p: Preset):
     return c.width + 2 * m, c.height + 2 * m, c.radius + m
 
 
-def camera_cutout_poly(p: Preset) -> Polygon:
+def camera_cutout_poly(p: Preset):
+    """Where the backplate is cut away for the camera (design coordinates).
+
+    Ring mount: the island + style.camera_cutout_margin (the camera ring's spigot fills it).
+    Open cut-out (camera.ring = False): the island + camera_aperture_margin + camera_ring_clearance,
+    widened through the backplate edge wherever it would leave a strip of plate narrower than
+    OPEN_CUTOUT_MIN_STRIP, so an island that hugs the edge or a full-width camera plateau becomes
+    a clean notch instead of a fragile sliver. May extend past the plate outline."""
     cx, cy = p.camera_center()
-    w, h, r = camera_cutout_dims(p)
-    return rrect_poly(w, h, r, cx, cy)
+    if p.camera.ring:
+        w, h, r = camera_cutout_dims(p)
+        return rrect_poly(w, h, r, cx, cy)
+    c, m = p.camera, p.style.camera_aperture_margin + p.clearances.camera_ring_clearance
+    return _open_cutout(round(p.W, 4), round(p.L, 4), round(p.body.corner_radius, 4), round(p.tongue_offset, 4),
+                        round(cx, 4), round(cy, 4), round(c.width + 2 * m, 4), round(c.height + 2 * m, 4),
+                        round(c.radius + m, 4))
+
+
+@lru_cache(maxsize=64)
+def _open_cutout(W, L, R, tongue_off, cx, cy, w, h, r):
+    base = rrect_poly(w, h, r, cx, cy)
+    outer = rrect_poly(W + 2 * tongue_off, L + 2 * tongue_off, R + tongue_off)
+    rest = outer.difference(base)
+    half = OPEN_CUTOUT_MIN_STRIP / 2
+    kept = [g for g in _parts(rest.buffer(-half, quad_segs=16).buffer(half, quad_segs=16).intersection(rest))
+            if g.geom_type == "Polygon"]
+    if not kept:
+        return base
+    main = max(kept, key=lambda g: g.area)          # the plate; smaller pieces would be cut loose
+    removed = outer.difference(main).buffer(-0.02).buffer(0.02)   # drop numeric slivers along the outline
+    if removed.is_empty:
+        return base
+    # run 0.3 mm past the plate outline next to the cut, so the polygonal tool fully clears the
+    # exact B-rep arcs of the plate (no slivers left behind), without touching the kept plate
+    removed = removed.buffer(0.3, quad_segs=8).difference(main)
+    return unary_union([base, removed])
 
 
 def _polys(geom) -> list[Polygon]:
@@ -92,10 +124,14 @@ def _parts(geom) -> list:
     return list(geom.geoms) if hasattr(geom, "geoms") else [geom]
 
 
+MAGSAFE_R_OUT, MAGSAFE_R_IN = 27.2, 22.8          # magnet ring 54.4 mm OD, 45.6 mm ID
+MAGSAFE_TAIL = (-2.4, -38.5, 2.4, -29.0)          # alignment tail below the ring (x0, y0, x1, y1)
+
+
 def magsafe_ring_poly(p: Preset) -> Polygon:
     """Full MagSafe magnet ring footprint (54.4 mm OD, 45.6 mm ID + bottom alignment tail)."""
-    ring = Point(0.0, 0.0).buffer(27.2, quad_segs=48).difference(Point(0.0, 0.0).buffer(22.8, quad_segs=48))
-    tail = sbox(-2.4, -38.5, 2.4, -29.0)
+    ring = Point(0.0, 0.0).buffer(MAGSAFE_R_OUT, quad_segs=48).difference(Point(0.0, 0.0).buffer(MAGSAFE_R_IN, quad_segs=48))
+    tail = sbox(*MAGSAFE_TAIL)
     return affinity.translate(ring.union(tail), 0.0, p.style.magsafe_offset_y)
 
 
@@ -801,7 +837,10 @@ def _path(geoms, nd: int = 2, simplify: float = 0.0) -> str:
 
 
 def _camera_ring_poly(p: Preset):
-    """Camera ring as seen from the back: bezel flange minus the clear aperture at the outer face."""
+    """Camera ring as seen from the back: bezel flange minus the clear aperture at the outer face
+    (an empty polygon for an open camera cut-out, which has no ring)."""
+    if not p.camera.ring:
+        return Polygon()
     cx, cy = p.camera_center()
     cw, ch, cr = camera_cutout_dims(p)
     bw = p.style.camera_bezel_width

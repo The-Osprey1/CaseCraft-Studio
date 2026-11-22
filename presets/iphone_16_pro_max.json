@@ -1,6 +1,6 @@
 {
   "id": "iphone_16_pro_max",
-  "name": "iPhone 16 Pro Max (approx - verify with calipers)",
+  "name": "iPhone 16 Pro Max (approx - verify with calipers)", "brand": "Apple", "year": 2024,
   "body": {"length": 163.0, "width": 77.6, "thickness": 8.25, "corner_radius": 12.0},
   "camera": {"x": 4.0, "y": 4.0, "width": 38.0, "height": 39.5, "radius": 10.0},
   "buttons": [

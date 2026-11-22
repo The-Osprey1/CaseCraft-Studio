@@ -190,15 +190,22 @@ def build_set_objects(oriented: dict, slots: dict | None = None) -> list[Obj]:
     """Whole case on one plate. The backplate object carries BASE + INLAY as two sub-parts
     (different slots) so colours stay co-registered. Default slots: frame 1 (TPU), plate 2,
     inlay 3, ring 2, buttons 2."""
+    return set_objects_from_meshes({name: mesh_from_shape(shape) for name, shape in oriented.items()}, slots)
+
+
+def set_objects_from_meshes(meshes: dict, slots: dict | None = None) -> list[Obj]:
+    """build_set_objects from print-pose meshes {oriented part name: (vertices, faces)}, so the
+    preview can lay out the bed from the meshes it already has (same objects, same order)."""
     s = {**DEFAULT_SLOTS, **(slots or {})}
-    objs = [Obj("Frame_TPU", [part_from_shape("Frame_TPU", oriented["Frame_TPU"], s["frame"])])]
-    plate_parts = [part_from_shape("Backplate_Base", oriented["Backplate_PLA"], s["plate"])]
-    if "Backplate_Inlay" in oriented:
-        plate_parts.append(part_from_shape("Backplate_Inlay", oriented["Backplate_Inlay"], s["inlay"]))
+    objs = [Obj("Frame_TPU", [Part("Frame_TPU", *meshes["Frame_TPU"], s["frame"])])]
+    plate_parts = [Part("Backplate_Base", *meshes["Backplate_PLA"], s["plate"])]
+    if "Backplate_Inlay" in meshes:
+        plate_parts.append(Part("Backplate_Inlay", *meshes["Backplate_Inlay"], s["inlay"]))
     objs.append(Obj("Backplate", plate_parts))
-    objs.append(Obj("CameraRing", [part_from_shape("CameraRing", oriented["CameraRing"], s["ring"])]))
-    if "Buttons" in oriented:
-        objs.append(Obj("Buttons", [part_from_shape("Buttons", oriented["Buttons"], s["buttons"])]))
+    if "CameraRing" in meshes:            # absent for an open camera cut-out
+        objs.append(Obj("CameraRing", [Part("CameraRing", *meshes["CameraRing"], s["ring"])]))
+    if "Buttons" in meshes:
+        objs.append(Obj("Buttons", [Part("Buttons", *meshes["Buttons"], s["buttons"])]))
     return objs
 
 
@@ -234,10 +241,9 @@ def write_toolchanger_3mf(path, design: dict, oriented: dict, slots: dict | None
         assembly_parts.append(part_from_shape("Backplate_Inlay", design["inlay"], s["inlay"]))
     for btn_id, btn_shape in design.get("buttons", []):
         assembly_parts.append(part_from_shape(f"Button_{btn_id}", btn_shape, s["buttons"]))
-    objs = [
-        Obj("Case_InPlace_Assembly", assembly_parts),
-        Obj("CameraRing", [part_from_shape("CameraRing", oriented["CameraRing"], s["ring"])]),
-    ]
+    objs = [Obj("Case_InPlace_Assembly", assembly_parts)]
+    if "CameraRing" in oriented:
+        objs.append(Obj("CameraRing", [part_from_shape("CameraRing", oriented["CameraRing"], s["ring"])]))
     return write_3mf(path, objs, pr, title="CaseCraft Toolchanger In-Place (experimental)")
 
 

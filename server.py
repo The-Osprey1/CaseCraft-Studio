@@ -13,13 +13,14 @@ import secrets
 import sys
 import tempfile
 import threading
+import time
 import uuid
 import zipfile
 from collections import OrderedDict
 from pathlib import Path
 
-from build123d import Pos
 import anyio
+import numpy as np
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
@@ -103,6 +104,11 @@ def design_findings(p: Preset, pr: PrinterProfile) -> list[dict]:
             out.append(_finding("warning", "pattern",
                                 f"Through-cut leaves {conn['thin_necks']} region(s) joined only by ligaments "
                                 "thinner than one extrusion width (0.4 mm); increase the web width or margin."))
+    if not p.camera.ring:
+        out.append(_finding("info", "camera",
+                            "Open camera cut-out: the backplate clears the camera island (it may run through the "
+                            "backplate edge) and there is no press-fit camera ring, so nothing on the case stands "
+                            "proud of the lenses. Check the cut-out with the camera fit-test coupon."))
     if pr.toolchanger:
         out += [_finding("warning" if i else "info", "print_in_place", m)
                 for i, m in enumerate(print_in_place.quick_findings(p))]
@@ -115,11 +121,10 @@ def design_findings(p: Preset, pr: PrinterProfile) -> list[dict]:
     return out
 
 
-def _bed_layout(oriented_map: dict, pr: PrinterProfile):
-    """Lay out the Case_Set objects exactly as the exported Case_Set.3mf does. If they do not
-    fit, they are still laid out (on an unbounded plate) so the preview SHOWS the overflow, and
-    an error finding blocks export."""
-    objs = bambu_3mf.build_set_objects(oriented_map)
+def _bed_layout(objs: list, pr: PrinterProfile):
+    """Lay out the Case_Set objects exactly as the exported Case_Set.3mf does (same objects, same
+    packing). If they do not fit, they are still laid out (on an unbounded plate) so the preview
+    SHOWS the overflow, and an error finding blocks export."""
     try:
         bambu_3mf.layout_for_printer(objs, pr)
         return objs, None
@@ -138,100 +143,122 @@ def _shape_to_stl_bytes(shape, tol: float = 0.02, ang: float = 0.15) -> bytes:
     return bytes(data)
 
 
-def _shape_to_stl_b64(shape, tol: float = 0.02, ang: float = 0.15) -> str:
-    return base64.b64encode(_shape_to_stl_bytes(shape, tol=tol, ang=ang)).decode("ascii")
+# ---------------------------------------------------------------- preview meshes
+# The preview sends every part ONCE, as an indexed mesh at preview resolution (exports keep their
+# own finer tessellation). The print-bed view reuses the same mesh: frame, plate, inlay and ring
+# print in their design orientation, so their bed pose is a translation (`bed_offset`); only the
+# buttons are rotated cap-down, so they carry their own small `bed_mesh`. Parts that do not depend
+# on the pattern (frame, ring, buttons, phone) are meshed once per geometry and cached.
+PREVIEW_TOL, PREVIEW_ANG = 0.05, 0.3
+_MESH_CACHE_MAX = 64
+_mesh_cache: OrderedDict[str, tuple] = OrderedDict()
 
 
-def _bbox_dict(shape) -> dict:
-    bb = shape.bounding_box()
-    return {
-        "min": [round(bb.min.X, 3), round(bb.min.Y, 3), round(bb.min.Z, 3)],
-        "max": [round(bb.max.X, 3), round(bb.max.Y, 3), round(bb.max.Z, 3)],
-    }
+def _preview_mesh(make_shape, key: str | None = None) -> tuple:
+    """(vertices float32 (n, 3), triangles uint32 (m, 3)) of `make_shape()` (a shape or a
+    zero-argument callable) at preview resolution; cached under `key` when given."""
+    if key is not None:
+        with _cache_lock:
+            if key in _mesh_cache:
+                _mesh_cache.move_to_end(key)
+                return _mesh_cache[key]
+    shape = make_shape() if callable(make_shape) else make_shape
+    v, f = dfm.tessellate(shape, PREVIEW_TOL, PREVIEW_ANG)
+    mesh = (v.astype(np.float32), f.astype(np.uint32))
+    if key is not None:
+        with _cache_lock:
+            _mesh_cache[key] = mesh
+            while len(_mesh_cache) > _MESH_CACHE_MAX:
+                _mesh_cache.popitem(last=False)
+    return mesh
+
+
+def _mesh_json(mesh: tuple, shift=(0.0, 0.0, 0.0)) -> dict:
+    """Little-endian base64 arrays the viewport turns straight into a BufferGeometry."""
+    v, f = mesh
+    if any(shift):
+        v = v + np.asarray(shift, np.float32)
+    small = len(v) < 65536
+    idx = np.ascontiguousarray(f, "<u2" if small else "<u4")
+    return {"positions": base64.b64encode(np.ascontiguousarray(v, "<f4").tobytes()).decode("ascii"),
+            "indices": base64.b64encode(idx.tobytes()).decode("ascii"),
+            "index_bits": 16 if small else 32, "triangles": int(len(f))}
+
+
+def _bbox_of(mesh: tuple, shift=(0.0, 0.0, 0.0)) -> dict:
+    v = mesh[0]
+    lo, hi = (v.min(0) + shift, v.max(0) + shift) if len(v) else (np.zeros(3), np.zeros(3))
+    return {"min": [round(float(x), 3) for x in lo], "max": [round(float(x), 3) for x in hi]}
+
+
+def _concat(meshes: list[tuple]) -> tuple:
+    vs, fs, off = [], [], 0
+    for v, f in meshes:
+        vs.append(v)
+        fs.append(f + off)
+        off += len(v)
+    return np.vstack(vs), np.vstack(fs)
+
+
+# oriented part name (cad_engine.build_case_parts) -> Case_Set object holding it
+_SET_OBJECT = {"Frame_TPU": "Frame_TPU", "Backplate_PLA": "Backplate", "Backplate_Inlay": "Backplate",
+               "CameraRing": "CameraRing", "Buttons": "Buttons"}
 
 
 def _build_preview(p: Preset, pr: PrinterProfile) -> dict:
     built = ce.build_case_parts(p)
-    timings, d, oriented_map = built["timings"], built["design"], built["oriented"]
-    frame, plate, inlay, ring, btns = d["frame"], d["plate"], d["inlay"], d["ring"], d["buttons"]
-    oriented_frame = oriented_map["Frame_TPU"]
-    oriented_plate = oriented_map["Backplate_PLA"]
-    oriented_ring = oriented_map["CameraRing"]
-    oriented_inlay = oriented_map.get("Backplate_Inlay")
-    laid_btns = ce.layout_row([ce.button_print_shape(p, b) for b in p.buttons]) if p.buttons else []  # == Buttons part
+    timings, d, offsets = built["timings"], built["design"], built["offsets"]
+    t_mesh = time.perf_counter()
+    meshes = {"Frame_TPU": _preview_mesh(d["frame"], ce.part_key(p, "frame")),
+              "Backplate_PLA": _preview_mesh(d["plate"])}
+    if d["inlay"] is not None:
+        meshes["Backplate_Inlay"] = _preview_mesh(d["inlay"])
+    if d["ring"] is not None:
+        meshes["CameraRing"] = _preview_mesh(d["ring"], ce.part_key(p, "ring"))
+    bkey = ce.part_key(p, "buttons")
+    btn_design = [_preview_mesh(shape, f"{bkey}#{i}") for i, (_, shape) in enumerate(d["buttons"])]
+    btn_print = [_preview_mesh(shape, f"print-{bkey}#{i}") for i, shape in enumerate(ce.buttons_print_layout(p))]
 
-    objs, overflow = _bed_layout(oriented_map, pr)
+    # print pose exactly as exported: each part grounded on Z=0 (a translation), buttons cap-down
+    print_meshes = {name: (v + np.asarray(offsets[name], np.float32), f) for name, (v, f) in meshes.items()}
+    if btn_print:
+        print_meshes["Buttons"] = _concat(btn_print)
+    objs, overflow = _bed_layout(bambu_3mf.set_objects_from_meshes(print_meshes), pr)
     # 3MF plate coordinates have the origin at the plate corner; the viewport centres the plate.
-    bed_offsets: dict[str, tuple[float, float]] = {}
+    shift: dict[str, tuple[float, float, float]] = {}
     for o in objs:
         lo, _ = o.bbox()
-        bed_offsets[o.name] = (o.position[0] - lo[0] - pr.bed_x / 2, o.position[1] - lo[1] - pr.bed_y / 2)
+        shift[o.name] = (float(o.position[0] - lo[0] - pr.bed_x / 2), float(o.position[1] - lo[1] - pr.bed_y / 2), 0.0)
 
-    def place_bed(shape, obj_name: str):
-        tx, ty = bed_offsets[obj_name]
-        return Pos(tx, ty, 0) * shape
+    def bed_offset(name: str) -> list[float]:
+        sx, sy, _ = shift[_SET_OBJECT[name]]
+        ox, oy, oz = offsets[name]
+        return [round(ox + sx, 4), round(oy + sy, 4), round(oz, 4)]
 
-    parts_list = [
-        {
-            "id": "frame",
-            "group": "frame",
-            "name": "TPU Bumper Frame",
-            "design_stl_b64": _shape_to_stl_b64(frame),
-            "bed_stl_b64": _shape_to_stl_b64(place_bed(oriented_frame, "Frame_TPU")),
-            "explode_vec": [0.0, 0.0, 0.0],
-            "bbox": _bbox_dict(frame),
-        },
-        {
-            "id": "backplate",
-            "group": "backplate",
-            "name": "Backplate",
-            "design_stl_b64": _shape_to_stl_b64(plate),
-            "bed_stl_b64": _shape_to_stl_b64(place_bed(oriented_plate, "Backplate")),
-            "explode_vec": [0.0, 0.0, -28.0],
-            "bbox": _bbox_dict(plate),
-        },
-    ]
+    def entry(pid, group, label, name, explode):
+        mesh = meshes[name]
+        return {"id": pid, "group": group, "name": label, "mesh": _mesh_json(mesh),
+                "bed_offset": bed_offset(name), "explode_vec": explode, "bbox": _bbox_of(mesh)}
 
-    if inlay is not None and oriented_inlay is not None:
-        parts_list.append({
-            "id": "inlay",
-            "group": "inlay",
-            "name": "Backplate Inlay (AMS 2)",
-            "design_stl_b64": _shape_to_stl_b64(inlay),
-            "bed_stl_b64": _shape_to_stl_b64(place_bed(oriented_inlay, "Backplate")),
-            "explode_vec": [0.0, 0.0, -42.0],
-            "bbox": _bbox_dict(inlay),
-        })
-
-    parts_list.append({
-        "id": "camera_ring",
-        "group": "camera_ring",
-        "name": "Camera Protection Ring",
-        "design_stl_b64": _shape_to_stl_b64(ring),
-        "bed_stl_b64": _shape_to_stl_b64(place_bed(oriented_ring, "CameraRing")),
-        "explode_vec": [0.0, 0.0, -56.0],
-        "bbox": _bbox_dict(ring),
-    })
-
-    for idx, (btn_param, (btn_id, btn_design)) in enumerate(zip(p.buttons, btns)):
-        bed_btn = place_bed(laid_btns[idx], "Buttons")
+    parts_list = [entry("frame", "frame", "TPU Bumper Frame", "Frame_TPU", [0.0, 0.0, 0.0]),
+                  entry("backplate", "backplate", "Backplate", "Backplate_PLA", [0.0, 0.0, -28.0])]
+    if "Backplate_Inlay" in meshes:
+        parts_list.append(entry("inlay", "inlay", "Backplate Inlay (AMS 2)", "Backplate_Inlay", [0.0, 0.0, -42.0]))
+    if "CameraRing" in meshes:
+        parts_list.append(entry("camera_ring", "camera_ring", "Camera Protection Ring", "CameraRing", [0.0, 0.0, -56.0]))
+    for btn, (btn_id, _), design_mesh, print_mesh in zip(p.buttons, d["buttons"], btn_design, btn_print):
         parts_list.append({
             "id": f"button_{btn_id}",
             "group": "buttons",
             "name": f"Button ({btn_id})",
-            "design_stl_b64": _shape_to_stl_b64(btn_design),
-            "bed_stl_b64": _shape_to_stl_b64(bed_btn),
-            "explode_vec": _EXPLODE_BY_SIDE[btn_param.side],
-            "bbox": _bbox_dict(btn_design),
+            "mesh": _mesh_json(design_mesh),
+            "bed_mesh": _mesh_json(print_mesh, shift["Buttons"]),
+            "explode_vec": _EXPLODE_BY_SIDE[btn.side],
+            "bbox": _bbox_of(design_mesh),
         })
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        svg_path = Path(tmpdir) / "Laser_Backplate.svg"
-        ce.laser_svg(p, svg_path)
-        svg_text = svg_path.read_text(encoding="utf-8")
-
-    phone_ghost = ce.offset_prism(p, 0.0, p.bp_t, p.bp_t + p.T)
-    phone_ghost_b64 = _shape_to_stl_b64(phone_ghost, tol=0.05, ang=0.3)
+    phone = _preview_mesh(lambda: ce.offset_prism(p, 0.0, p.bp_t, p.bp_t + p.T), ce.part_key(p, "phone"))
+    timings["mesh"] = round(time.perf_counter() - t_mesh, 3)
+    svg_text = ce.laser_svg_text(p)
 
     findings = design_findings(p, pr)
     if overflow:
@@ -251,9 +278,10 @@ def _build_preview(p: Preset, pr: PrinterProfile) -> dict:
             "outer_width": round(p.W + 2 * p.outer_offset, 2),
             "outer_length": round(p.L + 2 * p.outer_offset, 2),
             "total_height": round(p.H, 2),
-            "has_inlay": inlay is not None,
+            "has_inlay": d["inlay"] is not None,
             "has_magsafe": bool(p.style.magsafe_ring),
-            "phone_stl_b64": phone_ghost_b64,
+            "has_camera_ring": d["ring"] is not None,
+            "phone_mesh": _mesh_json(phone),
         },
     }
 
@@ -520,7 +548,9 @@ def _build_single_part(p: Preset, part: str, pr: PrinterProfile) -> tuple[bytes,
             key = {"frame_stl": "Frame_TPU", "backplate_stl": "Backplate_PLA", "ring_stl": "CameraRing",
                    "buttons_stl": "Buttons"}[part]
             if key not in oriented:
-                raise HTTPException(status_code=404, detail=f"Part {filename} not generated for current preset")
+                detail = (f"{p.name} uses an open camera cut-out, so there is no camera ring to export"
+                          if key == "CameraRing" else f"Part {filename} not generated for current preset")
+                raise HTTPException(status_code=404, detail=detail)
             return _shape_to_stl_bytes(oriented[key], tol=0.01, ang=0.1), dl_name, media_type
         return target.read_bytes(), dl_name, media_type
 

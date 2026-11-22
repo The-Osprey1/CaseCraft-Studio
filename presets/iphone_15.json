@@ -1,6 +1,6 @@
 {
   "id": "iphone_15",
-  "name": "iPhone 15 (approx - verify with calipers)",
+  "name": "iPhone 15 (approx - verify with calipers)", "brand": "Apple", "year": 2023,
   "body": {"length": 147.6, "width": 71.6, "thickness": 7.80, "corner_radius": 11.0},
   "camera": {"x": 3.8, "y": 3.8, "width": 31.0, "height": 31.0, "radius": 8.5},
   "buttons": [

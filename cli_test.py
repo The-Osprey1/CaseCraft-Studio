@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 import trimesh
-from build123d import Compound
+from build123d import Compound, Location
 
 import cad_engine as ce
 from params import Preset
@@ -96,7 +96,10 @@ def run(preset_id, pattern, mode, out, magsafe=False, printer=None, perf_budget=
     o = r["oriented"]
     check(abs(o["Frame_TPU"].bounding_box().size.Z - p.H) < 0.05, f"Frame prints back-down: height {o['Frame_TPU'].bounding_box().size.Z:.2f} == H {p.H:.2f}", res)
     check(abs(o["Backplate_PLA"].bounding_box().size.Z - p.bp_t) < 0.05, "Backplate prints outer-face-down (height == plate thickness)", res)
-    check(o["CameraRing"].bounding_box().size.Z > p.bp_t, "CameraRing prints bezel-down", res)
+    if p.camera.ring:
+        check(o["CameraRing"].bounding_box().size.Z > p.bp_t, "CameraRing prints bezel-down", res)
+    else:
+        check("CameraRing" not in o, "open camera cut-out: no camera ring part", res)
     if "Buttons" in o:
         check(o["Buttons"].bounding_box().size.Z < p.style.button_height + 0.1, "Buttons print cap-down (height == button height)", res)
     # frame DFM: no broad flat/steep overhangs (hole-roof bridges are reported, not failed)
@@ -112,8 +115,17 @@ def run(preset_id, pattern, mode, out, magsafe=False, printer=None, perf_budget=
     d = r["design"]
     fp = inter_volume(d["frame"], d["plate"])
     check(fp < 0.5, f"frame/backplate interference {fp:.3f} mm3 (expect ~0)", res)
-    check(inter_volume(d["frame"], d["ring"]) < 0.5, "frame/ring no interference", res)
-    check(inter_volume(d["plate"], d["ring"]) < 0.5, "plate/ring no interference", res)
+    if d["ring"] is not None:
+        check(inter_volume(d["frame"], d["ring"]) < 0.5, "frame/ring no interference", res)
+        check(inter_volume(d["plate"], d["ring"]) < 0.5, "plate/ring no interference", res)
+    else:
+        # the camera island / plateau stands proud of the phone back: nothing may sit in its footprint
+        cx, cy = p.camera_center()
+        island = ce.rrect_prism(p.camera.width, p.camera.height, p.camera.radius, -5.0, p.bp_t).moved(Location((cx, cy, 0)))
+        island = ce._solids_of(island.intersect(ce.offset_prism(p, 0.0, -5.0, p.bp_t)))   # part of the phone
+        check(inter_volume(island, d["plate"]) < 0.5 and inter_volume(island, d["frame"]) < 0.5,
+              "open camera cut-out: camera island footprint clear of plate + frame", res)
+        check(len(d["plate"].solids()) == 1, "open camera cut-out: backplate stays one piece", res)
     for n, b in d["buttons"]:
         check(inter_volume(d["frame"], b) < 0.5, f"button {n}: no interference with frame", res)
     # phone envelope vs parts
@@ -155,7 +167,8 @@ def run(preset_id, pattern, mode, out, magsafe=False, printer=None, perf_budget=
     # step reload
     from build123d import import_step
     asm = import_step(str(Path(out) / "Full_Assembly.step"))
-    check(len(asm.solids()) >= 3 + len(p.buttons), f"Full_Assembly.step re-imports ({len(asm.solids())} solids)", res)
+    expect = 2 + (1 if p.camera.ring else 0) + len(p.buttons)      # frame, plate, [ring], buttons
+    check(len(asm.solids()) >= expect, f"Full_Assembly.step re-imports ({len(asm.solids())} solids, {expect} parts)", res)
     return res, r["timings"]
 
 

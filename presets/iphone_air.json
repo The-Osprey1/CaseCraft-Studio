@@ -1,0 +1,25 @@
+{
+  "id": "iphone_air", "name": "iPhone Air", "brand": "Apple", "year": 2025,
+  "body": {"length": 156.18, "width": 74.7, "thickness": 5.64, "corner_radius": 12.9},
+  "camera": {"x": 0.0, "y": 0.0, "width": 74.7, "height": 34.4, "radius": 0.0, "ring": false},
+  "buttons": [
+    {"id": "action", "side": "left", "pos": 30.63, "length": 6.9},
+    {"id": "vol_up", "side": "left", "pos": 42.63, "length": 11.2},
+    {"id": "vol_down", "side": "left", "pos": 56.83, "length": 11.2},
+    {"id": "power", "side": "right", "pos": 46.43, "length": 17.8}
+  ],
+  "ports": [
+    {"id": "usbc", "side": "bottom", "center": 0.0, "width": 12.45, "height": 5.2, "radius": 2.6},
+    {"id": "mic_l", "side": "bottom", "center": -12.02, "width": 5.1, "height": 2.6, "radius": 1.2},
+    {"id": "mic_r", "side": "bottom", "center": 12.02, "width": 5.1, "height": 2.6, "radius": 1.2},
+    {"id": "camera_control", "side": "right", "center": -26.68, "width": 25.0, "height": 4.8, "radius": 2.0}
+  ],
+  "style": {"magsafe_offset_y": 0.9},
+  "verification": {
+    "level": "dimensionally_verified",
+    "source": "Apple dimensional drawing 'iPhone Air' (2025-09-09), developer.apple.com/accessories/dimensional-drawings",
+    "fit_test": "untested",
+    "notes": "Body, buttons, ports and MagSafe centre (Apple logo) are Apple's labelled dimensions; a button's pos is its labelled centre minus half its length. The camera plateau spans the full width from the top edge; its lower edge curves down to 34.2 mm at the centre (scaled off the drawing geometry), so the cut-out runs to 34.4 mm. It stands 3.03 mm proud of the back glass, so the case uses an open camera cut-out. The 5.64 mm body limits the USB-C opening to 5.2 mm (Apple recommends 6.6 mm for cable plugs: use a slim plug) and the Camera Control opening to 4.8 mm. Corner radius 12.9 mm is a circular fit to Apple's corner profile. Not fit-tested: print the camera and ports coupons first.",
+    "unverified_features": ["camera"]
+  }
+}

@@ -112,9 +112,10 @@ def pip_report(p, design: dict, layer_height: float = LAYER_HEIGHT) -> dict:
                         "message": ("inlay sits in its pocket with a "
                                     f"{p.clearances.backplate_snap_clearance / 2:.3f} mm side gap and bonds to the base"
                                     if ov <= TOL else f"inlay intersects the base ({ov:.3f} mm3)")})
-    entries.append({"parts": ["CameraRing"], "relationship": "post_assembly", "meaning": RELATIONSHIPS["post_assembly"],
-                    "status": "separate", "ok": True,
-                    "message": "camera ring is printed beside the case and pressed in afterwards"})
+    if design.get("ring") is not None:
+        entries.append({"parts": ["CameraRing"], "relationship": "post_assembly",
+                        "meaning": RELATIONSHIPS["post_assembly"], "status": "separate", "ok": True,
+                        "message": "camera ring is printed beside the case and pressed in afterwards"})
     problems = [e for e in entries if not e["ok"]]
     return {
         "experimental": True,

@@ -16,10 +16,17 @@ from server import app
 client = TestClient(app)
 
 
-def assert_b64_stl_valid(b64_str: str, label: str):
-    raw = base64.b64decode(b64_str)
-    assert len(raw) > 84, f"{label}: STL too small ({len(raw)} B)"
-    mesh = trimesh.load(io.BytesIO(raw), file_type="stl")
+def decode_mesh(m: dict, shift=(0.0, 0.0, 0.0)) -> trimesh.Trimesh:
+    """Preview mesh JSON (base64 little-endian float32 positions + uint16/32 indices) -> trimesh."""
+    import numpy as np
+    v = np.frombuffer(base64.b64decode(m["positions"]), "<f4").reshape(-1, 3).astype(float) + shift
+    f = np.frombuffer(base64.b64decode(m["indices"]), "<u2" if m["index_bits"] == 16 else "<u4").reshape(-1, 3)
+    assert len(f) == m["triangles"]
+    return trimesh.Trimesh(v, f, process=True)      # welds the per-face vertices
+
+
+def assert_mesh_valid(m: dict, label: str):
+    mesh = decode_mesh(m)
     assert len(mesh.faces) > 0 and mesh.is_watertight, f"{label}: mesh invalid or not watertight"
 
 
@@ -41,16 +48,21 @@ def test_presets():
     r = client.get("/presets")
     data = r.json()
     ids = {p["id"] for p in data["presets"]}
+    from_drawings = {"iphone_17", "iphone_17_pro", "iphone_17_pro_max", "iphone_air"}
     expected = {
         "iphone_15", "iphone_15_pro", "iphone_16_pro", "iphone_16_pro_max",
         "pixel_8_pro", "pixel_9_pro", "pixel_9_pro_xl",
         "galaxy_s24", "galaxy_s24_ultra", "oneplus_13",
-    }
+    } | from_drawings
     assert ids == expected
     assert data["default_id"] == "iphone_15_pro"
     assert "properties" in data["schema"]
     for p in data["presets"]:          # verification metadata visible to the UI, honestly classified
-        assert p["verification"]["level"] == "approximate" and p["verification"]["fit_test"] == "untested"
+        level = "dimensionally_verified" if p["id"] in from_drawings else "approximate"
+        assert p["verification"]["level"] == level and p["verification"]["fit_test"] == "untested", p["id"]
+        assert p["brand"] in {"Apple", "Samsung", "Google", "OnePlus"} and 2023 <= p["year"] <= 2025, p["id"]
+    # the iPhone 17 family's camera island reaches the backplate edge: open cut-out, no ring
+    assert all(p["camera"]["ring"] is False for p in data["presets"] if p["id"] in from_drawings)
     assert len(client.get("/api/presets").json()["presets"]) == len(ids)
 
 
@@ -111,8 +123,13 @@ def test_generate_preview():
     assert d1["unibody_notes"]
     for pt in d1["parts"]:
         assert len(pt["explode_vec"]) == 3
-        assert_b64_stl_valid(pt["design_stl_b64"], f"hex design {pt['id']}")
-        assert_b64_stl_valid(pt["bed_stl_b64"], f"hex bed {pt['id']}")
+        assert_mesh_valid(pt["mesh"], f"hex design {pt['id']}")
+        if pt["group"] == "buttons":            # print rotated cap-down: own bed mesh
+            assert_mesh_valid(pt["bed_mesh"], f"hex bed {pt['id']}")
+        else:                                   # print in their design orientation: a translation
+            assert len(pt["bed_offset"]) == 3
+    assert_mesh_valid(d1["summary"]["phone_mesh"], "phone ghost")
+    assert d1["summary"]["has_camera_ring"] is True and "mesh" in d1["timings"]
 
     payload_txt = copy.deepcopy(_presets()["iphone_15_pro"])
     payload_txt["pattern"] = {"type": "text", "mode": "inlay", "depth": 0.8, "margin": 3.0, "web": 1.6,
@@ -120,13 +137,17 @@ def test_generate_preview():
     d2 = client.post("/api/generate-preview", json=payload_txt).json()
     assert d2["summary"]["has_inlay"] is True
     inlay_parts = [pt for pt in d2["parts"] if pt["id"] == "inlay"]
+    plate_part = next(pt for pt in d2["parts"] if pt["id"] == "backplate")
     assert len(inlay_parts) == 1
-    assert_b64_stl_valid(inlay_parts[0]["bed_stl_b64"], "text inlay bed")
+    assert_mesh_valid(inlay_parts[0]["mesh"], "text inlay")
+    assert inlay_parts[0]["bed_offset"] == plate_part["bed_offset"]     # co-registered on the bed
     assert client.post("/api/generate-preview", json=payload_txt).status_code == 200   # cache hit
 
-    # OnePlus 13 camera overlaps a centred MagSafe ring: rejected until shifted
+    # OnePlus 13 camera overlaps a centred MagSafe ring: rejected until shifted (the preset ships
+    # with the ring shifted clear; re-centre it to reproduce the clash)
     payload_vor = copy.deepcopy(_presets()["oneplus_13"])
     payload_vor["style"]["magsafe_ring"] = True
+    payload_vor["style"]["magsafe_offset_y"] = 0.0
     r_clip = client.post("/api/generate-preview", json=payload_vor)
     assert r_clip.status_code == 422 and "magsafe_offset_y" in r_clip.json()["detail"], r_clip.text
     payload_vor["style"]["magsafe_offset_y"] = -12.0
@@ -134,6 +155,22 @@ def test_generate_preview():
     r_vor = client.post("/api/generate-preview", json=payload_vor)
     assert r_vor.status_code == 200, r_vor.text
     assert r_vor.json()["summary"]["has_magsafe"] is True
+
+
+@pytest.mark.slow
+def test_preview_of_open_camera_cutout_device():
+    d = _presets()["iphone_17_pro"]
+    r = client.post("/api/generate-preview", json=d)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert not any(pt["group"] == "camera_ring" for pt in body["parts"])
+    assert body["summary"]["has_camera_ring"] is False and not body["export_blocked"]
+    assert any(f["source"] == "camera" and "Open camera cut-out" in f["message"] for f in body["findings"])
+    r = client.post("/api/export-part?part=ring_stl", json=d)
+    assert r.status_code == 404 and "no camera ring" in r.json()["detail"]
+    payload = copy.deepcopy(d)
+    payload["style"]["magsafe_ring"] = True               # ring centred on the Apple logo clears the plateau
+    assert client.post("/api/generate-preview", json=payload).status_code == 200
 
 
 @pytest.mark.slow

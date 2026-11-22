@@ -1,5 +1,5 @@
 {
-  "id": "pixel_8_pro", "name": "Pixel 8 Pro (approx - verify with calipers)",
+  "id": "pixel_8_pro", "name": "Pixel 8 Pro (approx - verify with calipers)", "brand": "Google", "year": 2023,
   "body": {"length": 162.6, "width": 76.5, "thickness": 8.8, "corner_radius": 10.0},
   "camera": {"x": 8.0, "y": 14.0, "width": 60.0, "height": 22.0, "radius": 8.0},
   "buttons": [

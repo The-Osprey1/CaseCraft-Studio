@@ -1,24 +1,93 @@
-import React from "react";
+import React, { useEffect, useId, useRef, useState } from "react";
 
-export function NumberField({ label, value, onChange, step = 0.1, min, max, unit = "mm" }) {
+const fmt = (v) => (Number.isFinite(v) ? String(Math.round(v * 1e4) / 1e4) : "");
+
+/**
+ * Number input you can actually type into: the text is kept as typed (so "-", "1." or an empty
+ * field while retyping are fine), a value is committed only once it parses and lies within
+ * [min, max], and an out-of-range or unparsable entry is flagged instead of being sent to the
+ * CAD engine. Enter commits, Escape restores the current value. `onFocusChange` lets a parent
+ * highlight what is being edited (e.g. on a device diagram).
+ */
+export function NumberField({ label, value, onChange, step = 0.1, min, max, unit = "mm", hint, onFocusChange }) {
+  const id = useId();
+  const [text, setText] = useState(fmt(value));
+  const [focused, setFocused] = useState(false);
+  const focusedRef = useRef(false);
+  useEffect(() => {
+    if (!focusedRef.current) setText(fmt(value));
+  }, [value]);
+
+  const parsed = text.trim() === "" ? NaN : Number(text.replace(",", "."));
+  const typing = focused && /^-?\.?$/.test(text.trim()); // "", "-" or "." on the way to a number
+  const problem = typing
+    ? null
+    : !Number.isFinite(parsed)
+    ? "Enter a number"
+    : min !== undefined && parsed < min
+    ? `Minimum ${min} ${unit}`.trim()
+    : max !== undefined && parsed > max
+    ? `Maximum ${max} ${unit}`.trim()
+    : null;
+
+  const update = (next) => {
+    setText(next);
+    const v = next.trim() === "" ? NaN : Number(next.replace(",", "."));
+    if (Number.isFinite(v) && (min === undefined || v >= min) && (max === undefined || v <= max) && v !== value) {
+      onChange(v);
+    }
+  };
+
   return (
-    <label className="flex flex-col gap-1">
+    <label className="flex flex-col gap-1" htmlFor={id}>
       <span className="text-[11px] text-slate-400">{label}</span>
-      <div className="flex items-center rounded-lg border border-slate-800 bg-slate-950 px-2.5 py-1.5 focus-within:border-cyan-500">
+      <div
+        className={`flex items-center rounded-lg border bg-slate-950 px-2.5 py-1.5 ${
+          problem ? "border-rose-500/70" : "border-slate-800 focus-within:border-cyan-500"
+        }`}
+      >
         <input
-          type="number"
-          step={step}
-          min={min}
-          max={max}
-          value={Number.isFinite(value) ? value : 0}
-          onChange={(e) => {
-            const v = parseFloat(e.target.value);
-            if (!Number.isNaN(v)) onChange(v);
+          id={id}
+          type="text"
+          inputMode="decimal"
+          value={text}
+          aria-invalid={Boolean(problem)}
+          onChange={(e) => update(e.target.value)}
+          onFocus={() => {
+            focusedRef.current = true;
+            setFocused(true);
+            onFocusChange?.(true);
           }}
-          className="w-full bg-transparent text-xs font-mono text-slate-100 outline-none"
+          onBlur={() => {
+            focusedRef.current = false;
+            setFocused(false);
+            onFocusChange?.(false);
+            if (problem || typing) setText(fmt(value)); // abandon an unusable entry
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              setText(fmt(value));
+              e.currentTarget.blur();
+            } else if (e.key === "Enter") {
+              e.currentTarget.blur();
+            } else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && Number.isFinite(parsed)) {
+              e.preventDefault();
+              const k = e.shiftKey ? 10 : 1;
+              let v = parsed + (e.key === "ArrowUp" ? step : -step) * k;
+              if (min !== undefined) v = Math.max(min, v);
+              if (max !== undefined) v = Math.min(max, v);
+              update(fmt(v));
+            }
+          }}
+          className="w-full min-w-0 bg-transparent text-xs font-mono text-slate-100 outline-none"
         />
         {unit && <span className="ml-1 text-[10px] text-slate-500">{unit}</span>}
       </div>
+      {problem ? (
+        <span className="text-[10px] text-rose-300">{problem}</span>
+      ) : (
+        hint && <span className="text-[10px] text-slate-500">{hint}</span>
+      )}
     </label>
   );
 }

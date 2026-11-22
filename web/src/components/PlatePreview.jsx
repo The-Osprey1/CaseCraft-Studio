@@ -31,6 +31,8 @@ export default function PlatePreview({ frame, cuts, colors, mode = "through", sh
       role="img"
       aria-label={label}
     >
+      {/* the phone seen through the camera cut-out (a whole band for a camera plateau) */}
+      {frame.camera && <path d={frame.camera} fill={hole} fillRule="evenodd" />}
       <path d={frame.frame} fill={colors.frame} fillRule="evenodd" />
       <path d={frame.plate} fill={colors.backplate} fillRule="evenodd" />
       {cuts && mode === "through" && <path d={cuts} fill={hole} fillRule="evenodd" />}

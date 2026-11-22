@@ -8,8 +8,12 @@ Design pose: see params.py docstring (z=0 = outer backplate face, phone at +Z).
 """
 from __future__ import annotations
 
+import dataclasses
+import json
 import logging
+import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 from build123d import (Box, Circle, Compound, Face, Location, Plane, Pos, RectangleRounded, Rot,
@@ -28,6 +32,54 @@ from safe_ops import safe_chamfer, safe_corner_radius, safe_fillet
 log = logging.getLogger("casecraft")
 EPS = 0.01
 SIDE_ANGLE = {"right": 0, "top": 90, "left": 180, "bottom": 270}
+
+
+# ----------------------------------------------------------------------------- part memo
+# The frame, camera ring and buttons do not depend on the backplate pattern, which is what a
+# user changes most. They are memoised on exactly the parameters they read, so a pattern edit
+# (and the export that follows a preview) only rebuilds the backplate. Shapes are never mutated
+# in place (every transform returns a new shape), so sharing them is safe.
+_PART_CACHE: OrderedDict = OrderedDict()
+_PART_CACHE_MAX = 32
+_part_lock = threading.Lock()
+_NOT_FRAME = ("camera_", "magsafe_")
+
+
+def part_key(p: Preset, part: str) -> str:
+    """Canonical key of the parameters one part's geometry depends on (frame | ring | buttons |
+    phone). Over-inclusive is only a cache miss; never leave out something the generator reads."""
+    d = dataclasses.asdict(p)
+    style = d["style"]
+    if part == "frame":
+        deps = [d["body"], d["clearances"], {k: v for k, v in style.items() if not k.startswith(_NOT_FRAME)},
+                d["buttons"], d["ports"]]
+    elif part == "ring":
+        deps = [d["body"], d["camera"], style, d["clearances"]]
+    elif part == "buttons":
+        deps = [d["body"], d["buttons"], style, d["clearances"]]
+    elif part == "phone":
+        deps = [d["body"], style["backplate_thickness"]]
+    else:
+        raise ValueError(f"unknown part {part!r}")
+    return part + ":" + json.dumps(deps, sort_keys=True, separators=(",", ":"))
+
+
+def _memo(key: str, build):
+    with _part_lock:
+        if key in _PART_CACHE:
+            _PART_CACHE.move_to_end(key)
+            return _PART_CACHE[key]
+    value = build()
+    with _part_lock:
+        _PART_CACHE[key] = value
+        while len(_PART_CACHE) > _PART_CACHE_MAX:
+            _PART_CACHE.popitem(last=False)
+    return value
+
+
+def clear_part_cache() -> None:
+    with _part_lock:
+        _PART_CACHE.clear()
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -118,12 +170,22 @@ def button_print_shape(p: Preset, b) -> Solid:
 
 
 def generate_buttons(p: Preset) -> list[tuple[str, Solid]]:
-    """Buttons in DESIGN pose (assembled, pushed out). Returns [(id, solid)]."""
-    out = []
-    for b in p.buttons:
-        loc = _button_local(p, b)["button"]
-        out.append((b.id, place_on_edge(loc, p, b.side, button_along(p, b), button_zc(p))))
-    return out
+    """Buttons in DESIGN pose (assembled, pushed out). Returns [(id, solid)] (memoised)."""
+    def build():
+        out = []
+        for b in p.buttons:
+            loc = _button_local(p, b)["button"]
+            out.append((b.id, place_on_edge(loc, p, b.side, button_along(p, b), button_zc(p))))
+        return out
+    return list(_memo(part_key(p, "buttons"), build))
+
+
+def buttons_print_layout(p: Preset) -> list:
+    """Every button in print pose (cap down), laid out in a row along X: the Buttons part (memoised)."""
+    if not p.buttons:
+        return []
+    return list(_memo("print-" + part_key(p, "buttons"),
+                      lambda: layout_row([button_print_shape(p, b) for b in p.buttons])))
 
 
 # ----------------------------------------------------------------------------- frame
@@ -165,6 +227,11 @@ def _port_cutters(p: Preset) -> list[Solid]:
 
 
 def generate_frame(p: Preset) -> Solid:
+    """TPU bumper frame (memoised: it does not depend on the camera or the backplate pattern)."""
+    return _memo(part_key(p, "frame"), lambda: _build_frame(p))
+
+
+def _build_frame(p: Preset) -> Solid:
     s = p.style
     bp_t = p.bp_t
     outer = _frame_outer(p)
@@ -235,21 +302,18 @@ def generate_backplate(p: Preset, with_pattern: bool = True):
     tongue = Pos(0, 0, p.bp_t - th) * tongue
     plate = body.fuse(tongue).clean()
     cx, cy = p.camera_center()
-    w, h, r = camera_cutout_dims(p)
-    plate = plate.cut(rrect_prism(w, h, r, -1, p.bp_t + 1).moved(Location((cx, cy, 0))))
-    # catch groove for the camera-ring snap bead (open to the inner face)
-    g = 2 * (p.style.camera_bead - p.clearances.camera_ring_clearance + 0.05)   # per-side growth beyond cutout
-    gz0 = p.bp_t - 0.5 - 0.05
-    plate = plate.cut(rrect_prism(w + g + 0.0, h + g, r + g / 2, gz0, p.bp_t + 1).moved(Location((cx, cy, 0))))
+    if p.camera.ring:
+        w, h, r = camera_cutout_dims(p)
+        plate = plate.cut(rrect_prism(w, h, r, -1, p.bp_t + 1).moved(Location((cx, cy, 0))))
+        # catch groove for the camera-ring snap bead (open to the inner face)
+        g = 2 * (p.style.camera_bead - p.clearances.camera_ring_clearance + 0.05)   # per-side growth beyond cutout
+        gz0 = p.bp_t - 0.5 - 0.05
+        plate = plate.cut(rrect_prism(w + g + 0.0, h + g, r + g / 2, gz0, p.bp_t + 1).moved(Location((cx, cy, 0))))
+    else:
+        plate = _keep_main_solid(plate.cut(_prisms(camera_cutout_poly(p), -1.0, p.bp_t + 2.0)), "backplate")
     if s.magsafe_ring:
-        mp = magsafe_pocket_poly(p)
-        mags = [g for g in (mp.geoms if hasattr(mp, "geoms") else [mp])
-                if g.geom_type == "Polygon" and g.area > 0.5]
-        if mags:
-            z0 = p.bp_t - s.magsafe_depth
-            tools = [Pos(0, 0, z0) * Solid.extrude(_poly_to_face(g), Vector(0, 0, s.magsafe_depth + 0.5))
-                     for g in mags]
-            plate = plate.cut(Compound(tools)).clean()
+        z0 = p.bp_t - s.magsafe_depth
+        plate = plate.cut(_magsafe_tool(p, z0, s.magsafe_depth + 0.5)).clean()
     if not _is_valid(plate):
         raise RuntimeError("backplate invalid")
     if with_pattern:
@@ -267,6 +331,18 @@ def _poly_to_face(poly: Polygon) -> Face:
     return Face(wire(poly.exterior.coords), [wire(i.coords) for i in poly.interiors])
 
 
+CUT_TOL = 0.02   # mm: cut tools follow the 2D outlines this closely (far below FDM or laser resolution)
+
+
+def _thin(poly: Polygon) -> Polygon:
+    """The outline with near-collinear vertices dropped (deviation <= CUT_TOL). Text glyphs, SVG
+    art and sampled curves arrive with ~10x more vertices than the shape needs, and every vertex
+    becomes a B-rep face of the cut (text: 2.9 s -> 0.2 s). Corners and stencil bridges stay; the
+    2D geometry (checks, preview, laser SVG) is untouched."""
+    g = poly.simplify(CUT_TOL, preserve_topology=True)
+    return g if g.geom_type == "Polygon" and g.is_valid and not g.is_empty else poly
+
+
 def _cell_face(c: Cell, shrink: float = 0.0) -> Face | None:
     """B-rep face of one cut-out (optionally shrunk, for inlay clearance). Exact circles become
     true circles: one cylindrical side face instead of dozens of facets."""
@@ -275,13 +351,49 @@ def _cell_face(c: Cell, shrink: float = 0.0) -> Face | None:
         r -= shrink
         return Pos(x, y, 0) * Circle(r).face() if r > 0.05 else None
     if shrink <= 0:
-        return _poly_to_face(c.poly)
-    return [_poly_to_face(g) for g in _parts_of(c.poly.buffer(-shrink))
+        return _poly_to_face(_thin(c.poly))
+    return [_poly_to_face(_thin(g)) for g in _parts_of(c.poly.buffer(-shrink))
             if g.geom_type == "Polygon" and g.area > 0.1] or None
 
 
 def _parts_of(geom) -> list:
     return [] if geom.is_empty else (list(geom.geoms) if hasattr(geom, "geoms") else [geom])
+
+
+def _magsafe_tool(p: Preset, z0: float, h: float):
+    """Cutter for the MagSafe magnet pocket, from z0 up by h. magsafe_pocket_poly() validates the
+    ring position first (it raises if the camera or the plate edge would trim the ring). An
+    untrimmed ring is cut with true circles: two cylindrical faces instead of ~400 facets, and
+    about 0.3 s faster. A ring trimmed within the allowed 0.5 % keeps the polygonal pocket."""
+    from patterns import MAGSAFE_R_IN, MAGSAFE_R_OUT, MAGSAFE_TAIL, magsafe_ring_poly
+    pocket = magsafe_pocket_poly(p)
+    if abs(pocket.area - magsafe_ring_poly(p).area) > 1e-6:
+        return _prisms(pocket, z0, h)
+    oy = p.style.magsafe_offset_y
+    ring = (Solid.extrude(Circle(MAGSAFE_R_OUT).face(), Vector(0, 0, h))
+            .cut(Solid.extrude(Circle(MAGSAFE_R_IN).face(), Vector(0, 0, h))))
+    x0, y0, x1, y1 = MAGSAFE_TAIL
+    tail = Pos((x0 + x1) / 2, (y0 + y1) / 2, h / 2) * Box(x1 - x0, y1 - y0, h)
+    return Pos(0, oy, z0) * Compound([ring, tail])
+
+
+def _prisms(geom, z0: float, h: float):
+    """Prism tool(s) of the polygon parts of a 2D shapely geometry, from z0 up by h."""
+    tools = [Pos(0, 0, z0) * Solid.extrude(_poly_to_face(g), Vector(0, 0, h)) for g in _polys(geom)]
+    return tools[0] if len(tools) == 1 else Compound(tools)
+
+
+def _keep_main_solid(shape, name: str):
+    """After a cut that may leave numeric slivers (polygonal 2D tools against exact B-rep arcs),
+    keep the main solid. Anything bigger than a sliver means the geometry really split: raise."""
+    solids = list(shape.solids())
+    if len(solids) <= 1:
+        return shape
+    main = max(solids, key=lambda s: s.volume)
+    stray = sum(s.volume for s in solids if s is not main)
+    if stray > 0.5:
+        raise RuntimeError(f"{name}: the camera cut-out split off {stray:.1f} mm3 of material")
+    return main
 
 
 def apply_backplate_pattern(plate: Solid, p: Preset):
@@ -329,8 +441,14 @@ def laser_polys(p: Preset):
 
 
 def laser_svg(p: Preset, path: Path) -> Path:
+    Path(path).write_text(laser_svg_text(p), encoding="utf-8")
+    return Path(path)
+
+
+def laser_svg_text(p: Preset) -> str:
+    """Laser_Backplate.svg contents: closed 1:1 mm paths of the flat backplate, back view."""
     shape = laser_polys(p)
-    geoms = list(shape.geoms) if hasattr(shape, "geoms") else [shape]
+    geoms = [g for g in _parts_of(shape) if g.geom_type == "Polygon"]
     minx, miny, maxx, maxy = shape.bounds
     pad = 1.0
     wmm, hmm = maxx - minx + 2 * pad, maxy - miny + 2 * pad
@@ -344,12 +462,18 @@ def laser_svg(p: Preset, path: Path) -> Path:
            f'<svg xmlns="http://www.w3.org/2000/svg" width="{wmm:.3f}mm" height="{hmm:.3f}mm" '
            f'viewBox="0 0 {wmm:.3f} {hmm:.3f}">\n'
            f'  <path d="{d}" fill="none" stroke="#ff0000" stroke-width="0.1" fill-rule="evenodd"/>\n</svg>\n')
-    Path(path).write_text(svg, encoding="utf-8")
-    return Path(path)
+    return svg
 
 
 # ----------------------------------------------------------------------------- camera ring
-def generate_camera_ring(p: Preset) -> Solid:
+def generate_camera_ring(p: Preset) -> Solid | None:
+    """Press-fit camera ring, or None for an open camera cut-out (camera.ring = False). Memoised."""
+    if not p.camera.ring:
+        return None
+    return _memo(part_key(p, "ring"), lambda: _build_camera_ring(p))
+
+
+def _build_camera_ring(p: Preset) -> Solid:
     s = p.style
     cx, cy = p.camera_center()
     cw, ch, cr = camera_cutout_dims(p)                        # plate cutout
@@ -396,11 +520,22 @@ def _bottom_contact_area(shape, tol=1e-3) -> tuple[float, float]:
 _ROTS = [(0, 0, 0), (180, 0, 0), (90, 0, 0), (-90, 0, 0), (0, 90, 0), (0, -90, 0)]
 
 
+def print_offset(shape, ref=None, center_xy: bool = True) -> tuple[float, float, float]:
+    """Translation that grounds `shape` (as-is, no rotation) at Z=0 centred in XY; with `ref`,
+    the translation that grounds `ref` (co-registered parts such as plate + inlay)."""
+    bb = (ref if ref is not None else shape).bounding_box()
+    cx = (bb.min.X + bb.max.X) / 2 if center_xy else 0.0
+    cy = (bb.min.Y + bb.max.Y) / 2 if center_xy else 0.0
+    return (-cx, -cy, -bb.min.Z)
+
+
 def orient_for_print(shape, center_xy: bool = True, rot=None, ref=None):
     """Orient a part for FDM and ground it at Z=0, centred in XY.
     `rot` = explicit (rx, ry, rz) chosen per part for support-free printing (frame: lip down,
     plate: outer face down, ring: bezel down, button: cap down). Without it, falls back to the
     axis-aligned orientation with the largest flat bed contact (tie-break: lowest height)."""
+    if rot is not None and tuple(rot) == (0, 0, 0):       # common case: a pure translation
+        return Pos(*print_offset(shape, ref, center_xy)) * shape
     best = None
     for r in ([rot] if rot is not None else _ROTS):
         cand = Rot(*r) * shape
@@ -411,10 +546,8 @@ def orient_for_print(shape, center_xy: bool = True, rot=None, ref=None):
     out = best[1]
     # `ref`: ground/centre using ANOTHER shape (same rotation) so co-registered parts (plate+inlay)
     # keep their relative position.
-    bb = (Rot(*(rot if rot is not None else (0, 0, 0))) * ref).bounding_box() if ref is not None else out.bounding_box()
-    cx = (bb.min.X + bb.max.X) / 2 if center_xy else 0
-    cy = (bb.min.Y + bb.max.Y) / 2 if center_xy else 0
-    return Pos(-cx, -cy, -bb.min.Z) * out
+    rref = (Rot(*(rot if rot is not None else (0, 0, 0))) * ref) if ref is not None else None
+    return Pos(*print_offset(out, rref, center_xy)) * out
 
 
 def layout_row(shapes: list, gap: float = 6.0):
@@ -447,19 +580,23 @@ def build_case_parts(p: Preset) -> dict:
 
     frame = timed("frame", lambda: generate_frame(p))
     plate, inlay = timed("backplate", lambda: generate_backplate(p))
-    ring = timed("camera_ring", lambda: generate_camera_ring(p))
+    ring = timed("camera_ring", lambda: generate_camera_ring(p))        # None: open camera cut-out
     btns = timed("buttons", lambda: generate_buttons(p))
-    oriented = {
-        "Frame_TPU": orient_for_print(frame, rot=(0, 0, 0)),       # BACK-DOWN: rear face on bed, lip prints last
-        "Backplate_PLA": orient_for_print(plate, rot=(0, 0, 0)),   # outer face on bed
-        "CameraRing": orient_for_print(ring, rot=(0, 0, 0)),       # bezel on bed
-    }
-    if btns:
-        oriented["Buttons"] = Compound(layout_row([button_print_shape(p, b) for b in p.buttons]), label="Buttons")
+    # every part prints in its design orientation, so its print pose is a pure translation
+    # (frame BACK-DOWN with the lip printing last, plate and inlay outer face down, ring bezel down)
+    offsets = {"Frame_TPU": print_offset(frame), "Backplate_PLA": print_offset(plate)}
+    if ring is not None:
+        offsets["CameraRing"] = print_offset(ring)
     if inlay is not None:
-        oriented["Backplate_Inlay"] = orient_for_print(inlay, rot=(0, 0, 0), ref=plate)  # same transform as plate
+        offsets["Backplate_Inlay"] = offsets["Backplate_PLA"]          # co-registered with the plate
+    src = {"Frame_TPU": frame, "Backplate_PLA": plate, "CameraRing": ring, "Backplate_Inlay": inlay}
+    oriented = {name: Pos(*off) * src[name] for name, off in offsets.items() if name != "Backplate_Inlay"}
+    if btns:
+        oriented["Buttons"] = Compound(buttons_print_layout(p), label="Buttons")
+    if inlay is not None:
+        oriented["Backplate_Inlay"] = Pos(*offsets["Backplate_Inlay"]) * inlay
     design = {"frame": frame, "plate": plate, "inlay": inlay, "ring": ring, "buttons": btns}
-    return {"design": design, "oriented": oriented, "timings": timings}
+    return {"design": design, "oriented": oriented, "offsets": offsets, "timings": timings}
 
 
 def export_set(p: Preset, out_dir: str | Path, printer=None) -> dict:
@@ -484,7 +621,9 @@ def export_set(p: Preset, out_dir: str | Path, printer=None) -> dict:
             raise RuntimeError(f"STEP export failed: {name}")
         files += [stl, step]
 
-    asm_children = [_label(d["frame"], "Frame"), _label(d["plate"], "Backplate"), _label(d["ring"], "CameraRing")]
+    asm_children = [_label(d["frame"], "Frame"), _label(d["plate"], "Backplate")]
+    if d["ring"] is not None:
+        asm_children.append(_label(d["ring"], "CameraRing"))
     asm_children += [_label(b, f"Button_{n}") for n, b in d["buttons"]]
     asm = Compound(asm_children, label="Full_Assembly")
     asm_path = out / "Full_Assembly.step"
@@ -523,8 +662,12 @@ def unibody_adaptations(p: Preset) -> list[str]:
     if p.buttons:
         notes.append("Unibody: floating buttons are replaced by raised TPU button covers with an inner "
                      "press nub (single material cannot hold a captured moving part).")
-    notes.append("Unibody: the camera surround is flush with the back (a raised bezel would lift the "
-                 "case off the bed when printing back-down); use the modular camera ring for a raised guard.")
+    if p.camera.ring:
+        notes.append("Unibody: the camera surround is flush with the back (a raised bezel would lift the "
+                     "case off the bed when printing back-down); use the modular camera ring for a raised guard.")
+    else:
+        notes.append("Unibody: the open camera cut-out goes straight through the floor, like the modular "
+                     "backplate (this device has no camera ring).")
     if p.pattern.type != "solid" and p.pattern.mode == "inlay":
         notes.append("Unibody: the 2-color inlay is exported as a deboss recess (single material).")
     return notes
@@ -560,17 +703,21 @@ def generate_unibody(p: Preset) -> Solid:
     if q.pattern.mode == "inlay":
         q.pattern.mode = "deboss"            # explicit adaptation, reported by unibody_adaptations()
     cuts = _cavity_and_lip_cuts(q, q.bp_t) + _port_cutters(q)
-    cx, cy = q.camera_center()
-    cuts += [Pos(cx, cy, 0) * t for t in camera_aperture_cutters(q, 0.0, q.bp_t)]
+    if q.camera.ring:
+        cx, cy = q.camera_center()
+        cuts += [Pos(cx, cy, 0) * t for t in camera_aperture_cutters(q, 0.0, q.bp_t)]
+    else:
+        # open cut-out through the floor, stopping just inside the cavity wall so the side walls
+        # stay whole (an edge-to-edge camera plateau passes between them)
+        hole = camera_cutout_poly(q).intersection(plate_outline_poly(q, q.cavity_offset - 0.1))
+        cuts.append(_prisms(hole, -1.0, q.bp_t + 1.0 + EPS))
     body = _frame_outer(q)
     for cutter in cuts:
         body = body.cut(cutter)
     for b in q.buttons:
         body = body.fuse(place_on_edge(_button_cover_local(q, b), q, b.side, button_along(q, b), button_zc(q)))
     if q.style.magsafe_ring:                 # magnets drop into the floor from the phone side
-        for g in _polys(magsafe_pocket_poly(q)):
-            z0 = q.bp_t - q.style.magsafe_depth
-            body = body.cut(Pos(0, 0, z0) * Solid.extrude(_poly_to_face(g), Vector(0, 0, q.style.magsafe_depth + 0.5)))
+        body = body.cut(_magsafe_tool(q, q.bp_t - q.style.magsafe_depth, q.style.magsafe_depth + 0.5))
     body = body.clean()
     body, _ = apply_backplate_pattern(body, q)
     if not _is_valid(body):
@@ -599,18 +746,22 @@ def _solids_of(r):
 def coupon_region(p: Preset, margin: float = 4.0, min_span: float = 30.0):
     """Corner (nearest the camera) region holding: the whole camera-ring interface, the same-side
     button closest to the camera, and >= min_span mm of straight frame<->backplate snap joint.
+    With an open camera cut-out (no ring) the region is the corner of the cut-out nearest the
+    camera's side: at most 40 mm wide, so a full-width camera plateau still gives a short print.
     Returns dict(x0,x1,y0,y1,sx,button)."""
     cx, cy = p.camera_center()
-    cw, ch, _ = camera_cutout_dims(p)
-    bez = p.style.camera_bezel_width
+    minx, miny, maxx, maxy = camera_cutout_poly(p).bounds
+    bez = p.style.camera_bezel_width if p.camera.ring else 0.0
     sx = 1 if cx >= 0 else -1
     side = "right" if sx > 0 else "left"
     cands = [b for b in p.buttons if b.side == side]
     btn = min(cands, key=lambda b: abs(button_along(p, b) - cy)) if cands else None
     outer = p.outer_offset
     x_edge, y_edge = sx * (p.W / 2 + outer + 1), p.L / 2 + outer + 1
-    x_in = cx - sx * (cw / 2 + bez + margin)
-    y_lo = cy - (ch / 2 + bez + margin)
+    x_in = (minx - bez - margin) if sx > 0 else (maxx + bez + margin)
+    if not p.camera.ring and abs(x_edge - x_in) > 40.0:
+        x_in = x_edge - sx * 40.0
+    y_lo = miny - bez - margin
     if btn is not None:
         by = button_along(p, btn)
         y_lo = min(y_lo, by - btn.length / 2 - margin)
@@ -636,12 +787,13 @@ def _coupon_camera(q: Preset) -> dict:
     reg = coupon_region(q)
     frame = _cut(generate_frame(q), reg["x0"], reg["x1"], reg["y0"], reg["y1"], q.H)
     plate = _cut(generate_backplate(q, with_pattern=False), reg["x0"], reg["x1"], reg["y0"], reg["y1"], q.H)
-    ring = generate_camera_ring(q)
+    ring = generate_camera_ring(q)                    # None: open camera cut-out
     oriented = {
         "Frame_TPU_coupon": orient_for_print(frame, rot=(0, 0, 0)),
         "Backplate_PLA_coupon": orient_for_print(plate, rot=(0, 0, 0)),
-        "CameraRing": orient_for_print(ring, rot=(0, 0, 0)),
     }
+    if ring is not None:
+        oriented["CameraRing"] = orient_for_print(ring, rot=(0, 0, 0))
     btn = None
     if reg["button"] is not None:
         b = reg["button"]

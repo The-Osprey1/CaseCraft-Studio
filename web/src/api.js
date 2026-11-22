@@ -61,8 +61,12 @@ export function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 30_000);
 }
 
-// Stable identity of "what is being designed": the full config plus the printer profile.
-// Previews and exports are only considered current when their key equals this.
+// Stable identity of "what is being designed": the config plus the printer profile, minus the
+// fields that never change geometry (naming and provenance), so renaming a device does not
+// rebuild the CAD model. Previews and exports are only considered current when their key equals this.
 export function designKey(config, printerId) {
-  return config ? JSON.stringify([config, printerId]) : null;
+  if (!config) return null;
+  // eslint-disable-next-line no-unused-vars
+  const { id, name, brand, year, verification, ...geometry } = config;
+  return JSON.stringify([geometry, printerId]);
 }

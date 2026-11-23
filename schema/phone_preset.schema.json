@@ -229,7 +229,10 @@
             "grid",
             "waves",
             "svg",
-            "text"
+            "text",
+            "dots",
+            "triangles",
+            "chevron"
           ]
         },
         "mode": {
@@ -251,8 +254,29 @@
         "stencil_bridges": {
           "type": "boolean"
         },
+        "edge": {
+          "enum": [
+            "clip",
+            "whole",
+            "fade"
+          ],
+          "description": "Lattice patterns only: clip = cells cut at the border (default), whole = only complete cells, fade = cells shrink towards the border"
+        },
+        "corner_radius": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 5,
+          "description": "Rounds the corners of lattice and stripe cut-outs (mm); 0 = sharp"
+        },
+        "fade_width": {
+          "type": "number",
+          "minimum": 2,
+          "maximum": 60,
+          "description": "edge = fade: distance from the border over which cells shrink (mm)"
+        },
         "params": {
-          "type": "object"
+          "type": "object",
+          "description": "hex/dots: pitch | voronoi: pitch, seed, relax | grid/triangles: pitch, angle | waves/chevron: pitch, amplitude, wavelength | svg: svg, size, rotation, offset | text: text, font, size, rotation, bold, offset"
         }
       }
     },

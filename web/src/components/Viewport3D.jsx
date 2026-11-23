@@ -1,10 +1,83 @@
 import React, { useEffect, useMemo, useRef } from "react";
-import { Canvas, useFrame } from "@react-three/fiber";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Environment, Lightformer, OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 
 const stlLoader = new STLLoader();
+
+// Camera presets (world is Z-up; the screen faces +Z, the case back faces -Z). The back view
+// looks up from below with the phone's top at the top of the screen, as you hold a case.
+const TARGET = [0, 0, 4];
+export const VIEWS = {
+  iso: [135, -175, 115],
+  front: [0, -55, 320],
+  back: [0, 55, -320],
+  side: [320, 0, 30],
+  bed: [0, -230, 220],
+};
+
+function toSpherical(v) {
+  const r = v.length() || 1;
+  return { r, theta: Math.acos(THREE.MathUtils.clamp(v.z / r, -1, 1)), phi: Math.atan2(v.y, v.x) };
+}
+
+/**
+ * Moves the camera to a preset when `request` ({name, nonce}) changes: an orbit around the
+ * target (Z-up spherical interpolation, shortest way round, ease-out), not a straight line
+ * through the model. Any drag by the user cancels it.
+ */
+function CameraRig({ request }) {
+  const camera = useThree((s) => s.camera);
+  const controls = useThree((s) => s.controls);
+  const anim = useRef(null);
+
+  useEffect(() => {
+    const pos = request && VIEWS[request.name];
+    if (!pos) return;
+    const fromT = controls ? controls.target.clone() : new THREE.Vector3(...TARGET);
+    const toT = new THREE.Vector3(...TARGET);
+    const from = toSpherical(camera.position.clone().sub(fromT));
+    const to = toSpherical(new THREE.Vector3(...pos).sub(toT));
+    const dphi = THREE.MathUtils.euclideanModulo(to.phi - from.phi + Math.PI, 2 * Math.PI) - Math.PI;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    anim.current = { from, to, dphi, fromT, toT, t: reduce ? 1 : 0 };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [request?.nonce]);
+
+  useEffect(() => {
+    if (!controls) return undefined;
+    const stop = () => {
+      anim.current = null;
+    };
+    controls.addEventListener("start", stop);
+    return () => controls.removeEventListener("start", stop);
+  }, [controls]);
+
+  useFrame((_, delta) => {
+    const a = anim.current;
+    if (!a) return;
+    a.t = Math.min(1, a.t + delta / 0.7);
+    const k = 1 - Math.pow(1 - a.t, 3);
+    const r = a.from.r + (a.to.r - a.from.r) * k;
+    const theta = a.from.theta + (a.to.theta - a.from.theta) * k;
+    const phi = a.from.phi + a.dphi * k;
+    const target = a.fromT.clone().lerp(a.toT, k);
+    camera.position.set(
+      target.x + r * Math.sin(theta) * Math.cos(phi),
+      target.y + r * Math.sin(theta) * Math.sin(phi),
+      target.z + r * Math.cos(theta)
+    );
+    if (controls) {
+      controls.target.copy(target);
+      controls.update();
+    } else {
+      camera.lookAt(target);
+    }
+    if (a.t >= 1) anim.current = null;
+  });
+  return null;
+}
 
 function decodeStlB64(b64) {
   if (!b64) return null;
@@ -19,7 +92,7 @@ function decodeStlB64(b64) {
   return geom;
 }
 
-function PartMesh({ part, viewMode, explode, color, visible }) {
+function PartMesh({ part, viewMode, explode, color, visible, stale }) {
   const meshRef = useRef();
   const b64 = viewMode === "bed" ? part.bed_stl_b64 : part.design_stl_b64;
 
@@ -51,10 +124,13 @@ function PartMesh({ part, viewMode, explode, color, visible }) {
 
   return (
     <mesh ref={meshRef} geometry={geometry} castShadow receiveShadow>
+      {/* stale = geometry of an older design while the new one is being built */}
       <meshStandardMaterial
         color={color}
         roughness={isTpu ? 0.58 : 0.34}
         metalness={isTpu ? 0.04 : 0.08}
+        transparent={stale}
+        opacity={stale ? 0.4 : 1}
       />
     </mesh>
   );
@@ -103,12 +179,21 @@ function BuildPlate({ x = 256, y = 256, fits = true }) {
   );
 }
 
+const FLOOR_Z = -68;
+
 function AssemblyFloor() {
+  const ref = useRef();
+  const camera = useThree((s) => s.camera);
+  // seen from below (back view) the floor would sit between the camera and the case back
+  useFrame(() => {
+    if (ref.current) ref.current.visible = camera.position.z > FLOOR_Z + 8;
+  });
   return (
     <gridHelper
-      args={[320, 32, "#1e293b", "#0f172a"]}
+      ref={ref}
+      args={[320, 32, "#2a3a52", "#162033"]}
       rotation={[Math.PI / 2, 0, 0]}
-      position={[0, 0, -68]}
+      position={[0, 0, FLOOR_Z]}
     />
   );
 }
@@ -121,26 +206,32 @@ export default function Viewport3D({
   visibleGroups,
   showPhoneGhost,
   bed,
+  viewRequest,
+  stale = false,
   hideHud = false,
 }) {
   const parts = preview?.parts || [];
   const phoneB64 = preview?.summary?.phone_stl_b64;
 
   return (
-    <div className="relative h-full w-full bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950">
+    <div
+      className="relative h-full w-full"
+      // a lit backdrop behind the model so dark filaments keep their silhouette
+      style={{ background: "radial-gradient(ellipse at 50% 42%, #243147 0%, #111a2b 48%, #060a14 100%)" }}
+    >
       <Canvas
         shadows
         dpr={[1, 2]}
         camera={{
           up: [0, 0, 1],
-          position: viewMode === "bed" ? [0, -230, 220] : [135, -175, 115],
+          position: viewMode === "bed" ? VIEWS.bed : VIEWS.iso,
           fov: 36,
           near: 1,
           far: 3000,
         }}
       >
-        <color attach="background" args={["#090d16"]} />
-        <ambientLight intensity={0.45} />
+        <CameraRig request={viewRequest} />
+        <ambientLight intensity={0.5} />
         <directionalLight position={[120, -140, 220]} intensity={1.35} castShadow shadow-mapSize={[1024, 1024]} />
         <directionalLight position={[-140, 120, 110]} intensity={0.65} color="#cbd5e1" />
         <directionalLight position={[0, 40, -160]} intensity={0.55} color="#7dd3fc" />
@@ -160,6 +251,7 @@ export default function Viewport3D({
               explode={explode}
               color={colors[part.group] || "#94a3b8"}
               visible={visibleGroups[part.group] !== false}
+              stale={stale}
             />
           ))}
           {viewMode === "assembly" && (
@@ -169,14 +261,7 @@ export default function Viewport3D({
 
         {viewMode === "bed" ? <BuildPlate x={bed?.x} y={bed?.y} fits={bed?.fits !== false} /> : <AssemblyFloor />}
 
-        <OrbitControls
-          makeDefault
-          enableDamping
-          dampingFactor={0.08}
-          target={[0, 0, viewMode === "bed" ? 4 : 0]}
-          minDistance={60}
-          maxDistance={600}
-        />
+        <OrbitControls makeDefault enableDamping dampingFactor={0.08} target={TARGET} minDistance={60} maxDistance={600} />
       </Canvas>
 
       {/* HUD Badges (optional when parent App renders unified HUD) */}

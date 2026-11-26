@@ -1,5 +1,5 @@
 {
-  "id": "galaxy_s24_ultra", "name": "Galaxy S24 Ultra (approx - verify with calipers)",
+  "id": "galaxy_s24_ultra", "name": "Galaxy S24 Ultra (approx - verify with calipers)", "brand": "Samsung", "year": 2024,
   "body": {"length": 162.3, "width": 79.0, "thickness": 8.6, "corner_radius": 6.5},
   "camera": {"x": 6.5, "y": 8.0, "width": 20.0, "height": 55.0, "radius": 10.0},
   "buttons": [
@@ -11,5 +11,6 @@
     {"id": "speaker", "side": "bottom", "center": -20.0, "width": 14.0, "height": 3.0, "radius": 1.4},
     {"id": "spen", "side": "bottom", "center": 24.0, "width": 9.0, "height": 6.0, "radius": 2.5}
   ],
+  "style": {"magsafe_offset_y": -5.0},
   "verification": {"level": "approximate", "source": "Not recorded: shipped with the initial CaseCraft release as an approximation", "fit_test": "untested", "notes": "Verify every dimension with calipers and print a fit-test coupon before a full case.", "unverified_features": ["body", "camera", "buttons", "ports"]}
 }

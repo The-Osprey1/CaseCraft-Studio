@@ -23,11 +23,57 @@ def _errors(d: dict) -> str:
 
 def test_all_presets_load_without_errors():
     paths = sorted(PRESETS.glob("*.json"))
-    assert len(paths) == 10
+    assert len(paths) == 14
     for path in paths:
         p = Preset.load(path)
         errs, _ = p.check()
         assert errs == [], f"{path.stem}: {errs}"
+        assert p.brand and p.year, f"{path.stem}: brand/year missing (the device picker groups by maker)"
+
+
+def test_open_camera_cutout_rules():
+    """camera.ring = False: the island may reach the phone edge (full-width plateau) but must lie
+    within the outline and leave a usable backplate; the ring rules no longer apply."""
+    d = _raw("iphone_17_pro")
+    assert d["camera"]["ring"] is False and d["camera"]["width"] == d["body"]["width"]
+    Preset.from_dict(d)                                     # full-width plateau is valid
+    d["camera"]["ring"] = True                              # ...but has no room for a ring
+    assert "open cut-out" in _errors(d)
+    d = _raw("iphone_17_pro")
+    d["camera"]["width"] += 1.0
+    assert "within the phone outline" in _errors(d)
+    d = _raw("iphone_17_pro")
+    d["camera"]["height"] = 0.8 * d["body"]["length"]
+    assert "more than half" in _errors(d)
+    d = _raw("iphone_17_pro")
+    d["camera"]["opening"] = {"width": 30.0, "height": 30.0, "radius": 5.0}
+    assert any("ignored with an open camera cut-out" in w for w in Preset.from_dict(d).warnings())
+    d = _raw("iphone_17_pro")
+    d["camera"]["ring"] = "no"
+    assert "camera.ring must be true or false" in _errors(d)
+
+
+def test_identity_fields_checked():
+    d = _raw()
+    d["year"] = 2025.5
+    assert "year must be a whole number" in _errors(d)
+    d = _raw()
+    d["brand"] = 7
+    assert "brand must be a string" in _errors(d)
+    d = _raw()
+    d["name"] = "x" * 81
+    assert "name must be at most 80" in _errors(d)
+    d = _raw()
+    d["id"] = 5
+    assert "id must be a string" in _errors(d)
+    d = _raw()
+    d["buttons"] = {"id": "power"}
+    assert "buttons must be a list of objects" in _errors(d)
+    d = _raw()
+    d["style"] = None                                       # an absent section still means defaults
+    Preset.from_dict(d)
+    d["style"] = []
+    assert "style must be an object" in _errors(d)
 
 
 def test_preset_without_optional_sections_still_loads():
@@ -134,9 +180,13 @@ def test_steep_waves_rejected_or_warned():
 
 
 def test_verification_metadata():
-    for path in sorted(PRESETS.glob("*.json")):          # shipped presets: honest, approximate
+    for path in sorted(PRESETS.glob("*.json")):          # shipped presets: honest provenance
         v = Preset.load(path).verification
-        assert v.level == "approximate" and v.fit_test == "untested" and v.source
+        # only presets taken from the maker's dimensional drawings claim measured dimensions;
+        # none is fit-tested until someone prints one
+        drawing = v.source.startswith("Apple dimensional drawing")
+        assert v.level == ("dimensionally_verified" if drawing else "approximate"), path.stem
+        assert v.fit_test == "untested" and v.source and v.notes
     d = _raw()
     del d["verification"]                                  # pre-metadata preset files still load
     assert Preset.from_dict(d).verification.level == "approximate"
@@ -179,6 +229,7 @@ def test_schema_documents_every_field():
                      ("verification", Verification)):
         assert {f.name for f in dc_fields(cls)} == set(props[key]["properties"]), key
     assert {f.name for f in dc_fields(CameraOpening)} == set(props["camera"]["properties"]["opening"]["properties"])
+    assert {"id", "name", "brand", "year"} <= set(props)
     for name, lo, hi, _, _ in __import__("params").CLEARANCE_LIMITS:
         c = props["clearances"]["properties"][name]
         assert (c["minimum"], c["maximum"]) == (lo, hi), name

@@ -2,9 +2,6 @@ import React, { useEffect, useMemo, useRef } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Environment, Lightformer, OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
-import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
-
-const stlLoader = new STLLoader();
 
 // Camera presets (world is Z-up; the screen faces +Z, the case back faces -Z). The back view
 // looks up from below with the phone's top at the top of the screen, as you hold a case.
@@ -79,36 +76,63 @@ function CameraRig({ request }) {
   return null;
 }
 
-function decodeStlB64(b64) {
-  if (!b64) return null;
+function b64Bytes(b64) {
   const bin = atob(b64);
-  const len = bin.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = bin.charCodeAt(i);
-  }
-  const geom = stlLoader.parse(bytes.buffer);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
+/**
+ * Server mesh ({positions, indices, index_bits}: little-endian base64 arrays) -> BufferGeometry.
+ * Vertices are per CAD face, so the computed normals are smooth across a curved face and crisp
+ * along its edges.
+ */
+function decodeMesh(mesh) {
+  if (!mesh?.positions || !mesh?.indices) return null;
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(b64Bytes(mesh.positions)), 3));
+  const raw = b64Bytes(mesh.indices);
+  geom.setIndex(new THREE.BufferAttribute(mesh.index_bits === 16 ? new Uint16Array(raw) : new Uint32Array(raw), 1));
   geom.computeVertexNormals();
   return geom;
 }
 
+// Mesh JSON arrives as fresh strings on every preview; decode by content, so an unchanged part
+// (the frame while only the pattern changes) keeps its GPU geometry.
+function useDecodedMesh(mesh) {
+  const positions = mesh?.positions;
+  const indices = mesh?.indices;
+  const bits = mesh?.index_bits;
+  const geometry = useMemo(
+    () => (positions ? decodeMesh({ positions, indices, index_bits: bits }) : null),
+    [positions, indices, bits]
+  );
+  useEffect(() => () => geometry?.dispose(), [geometry]);
+  return geometry;
+}
+
+const ORIGIN = [0, 0, 0];
+
 function PartMesh({ part, viewMode, explode, color, visible, stale }) {
   const meshRef = useRef();
-  const b64 = viewMode === "bed" ? part.bed_stl_b64 : part.design_stl_b64;
-
-  const geometry = useMemo(() => decodeStlB64(b64), [b64]);
-
-  useEffect(() => {
-    return () => {
-      if (geometry) geometry.dispose();
-    };
-  }, [geometry]);
+  const designGeometry = useDecodedMesh(part.mesh);
+  const bedGeometry = useDecodedMesh(part.bed_mesh); // buttons only: they print rotated cap-down
+  const onBed = viewMode === "bed";
+  const geometry = onBed && bedGeometry ? bedGeometry : designGeometry;
 
   const target = useMemo(() => {
-    if (viewMode === "bed") return [0, 0, 0];
+    if (onBed) return bedGeometry ? ORIGIN : part.bed_offset || ORIGIN;
     const [dx, dy, dz] = part.explode_vec || [0, 0, 0];
     return [dx * explode, dy * explode, dz * explode];
-  }, [viewMode, explode, part.explode_vec]);
+  }, [onBed, bedGeometry, explode, part.explode_vec, part.bed_offset]);
+
+  // switching between the assembly and the bed jumps; explode changes glide
+  const lastMode = useRef(viewMode);
+  useEffect(() => {
+    if (lastMode.current !== viewMode && meshRef.current) meshRef.current.position.set(...target);
+    lastMode.current = viewMode;
+  }, [viewMode, target]);
 
   useFrame((_, delta) => {
     if (!meshRef.current) return;
@@ -136,14 +160,8 @@ function PartMesh({ part, viewMode, explode, color, visible, stale }) {
   );
 }
 
-function PhoneGhostMesh({ b64, visible }) {
-  const geometry = useMemo(() => decodeStlB64(b64), [b64]);
-  useEffect(() => {
-    return () => {
-      if (geometry) geometry.dispose();
-    };
-  }, [geometry]);
-
+function PhoneGhostMesh({ mesh, visible }) {
+  const geometry = useDecodedMesh(mesh);
   if (!geometry || !visible) return null;
   return (
     <mesh geometry={geometry}>
@@ -211,7 +229,7 @@ export default function Viewport3D({
   hideHud = false,
 }) {
   const parts = preview?.parts || [];
-  const phoneB64 = preview?.summary?.phone_stl_b64;
+  const phoneMesh = preview?.summary?.phone_mesh;
 
   return (
     <div
@@ -255,7 +273,7 @@ export default function Viewport3D({
             />
           ))}
           {viewMode === "assembly" && (
-            <PhoneGhostMesh b64={phoneB64} visible={showPhoneGhost} />
+            <PhoneGhostMesh mesh={phoneMesh} visible={showPhoneGhost} />
           )}
         </group>
 

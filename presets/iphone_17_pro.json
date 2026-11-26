@@ -1,0 +1,25 @@
+{
+  "id": "iphone_17_pro", "name": "iPhone 17 Pro", "brand": "Apple", "year": 2025,
+  "body": {"length": 150.01, "width": 71.85, "thickness": 8.75, "corner_radius": 13.0},
+  "camera": {"x": 0.0, "y": 0.0, "width": 71.85, "height": 48.9, "radius": 0.0, "ring": false},
+  "buttons": [
+    {"id": "action", "side": "left", "pos": 30.83, "length": 6.9},
+    {"id": "vol_up", "side": "left", "pos": 42.83, "length": 11.2},
+    {"id": "vol_down", "side": "left", "pos": 57.03, "length": 11.2},
+    {"id": "power", "side": "right", "pos": 46.68, "length": 17.7}
+  ],
+  "ports": [
+    {"id": "usbc", "side": "bottom", "center": 0.0, "width": 12.45, "height": 6.6, "radius": 3.25},
+    {"id": "speaker", "side": "bottom", "center": -16.02, "width": 12.1, "height": 3.0, "radius": 1.4},
+    {"id": "mic", "side": "bottom", "center": 16.02, "width": 12.1, "height": 3.0, "radius": 1.4},
+    {"id": "camera_control", "side": "right", "center": -23.4, "width": 25.0, "height": 7.6, "radius": 2.2}
+  ],
+  "style": {"magsafe_offset_y": -20.3},
+  "verification": {
+    "level": "dimensionally_verified",
+    "source": "Apple dimensional drawing 'iPhone 17 Pro' (2025-09-09), developer.apple.com/accessories/dimensional-drawings",
+    "fit_test": "untested",
+    "notes": "Body, buttons, ports and MagSafe centre (Apple logo) are Apple's labelled dimensions; a button's pos is its labelled centre minus half its length. The camera plateau spans the full width from the top edge down to 48.9 mm (scaled off the drawing geometry, not a labelled dimension) and stands 2.55 mm proud of the back glass, more than the backplate is thick, so the case uses an open camera cut-out. Corner radius 13.0 mm is a circular fit to Apple's corner profile. Camera Control gets an opening (Apple's keep-out is 25.0 x 8.44 mm; 7.6 mm keeps TPU above the snap groove). Not fit-tested: print the camera and buttons coupons first.",
+    "unverified_features": ["camera"]
+  }
+}

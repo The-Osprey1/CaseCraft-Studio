@@ -212,3 +212,80 @@ def test_camera_opening_loft_geometry():
     assert ce.generate_camera_ring(Preset.from_dict({**d, "camera": {k: v for k, v in d["camera"].items()
                                                                      if k != "opening"}})).volume \
         == pytest.approx(base_ring.volume)
+
+
+# ------------------------------------------------------------------ open camera cut-out (no ring)
+# The iPhone 17 family's camera sits on a full-width plateau (17 Pro/Pro Max/Air) or an island
+# 1.2 mm from the edge (17): no room for the press-fit ring, so the backplate just clears it.
+OPEN_CUTOUT = ["iphone_17", "iphone_17_pro", "iphone_17_pro_max", "iphone_air"]
+
+
+def _island(p):
+    """The camera island / plateau as a solid standing proud of the phone back. It is part of the
+    phone, so it never reaches outside the phone outline (a square-cornered plateau spec follows
+    the rounded corners of the body)."""
+    from build123d import Location
+    cx, cy = p.camera_center()
+    c = p.camera
+    box = ce.rrect_prism(c.width, c.height, c.radius, -5.0, p.bp_t).moved(Location((cx, cy, 0)))
+    return ce._solids_of(box.intersect(ce.offset_prism(p, 0.0, -5.0, p.bp_t)))
+
+
+@pytest.mark.parametrize("pid", OPEN_CUTOUT)
+def test_open_camera_cutout_builds_without_ring(pid):
+    p = _preset(pid, "hex")
+    built = ce.build_case_parts(p)
+    d, o = built["design"], built["oriented"]
+    assert d["ring"] is None and "CameraRing" not in o and "CameraRing" not in built["offsets"]
+    assert len(d["plate"].solids()) == 1 and d["plate"].is_valid
+    island = _island(p)                    # the camera island / plateau stands proud of the back
+    assert verify.overlap_volume(island, d["plate"]) < 0.01
+    assert verify.overlap_volume(island, d["frame"]) < 0.01
+    uni = ce.print_ready_unibody(p)        # asserts one watertight piece
+    assert verify.overlap_volume(ce.orient_for_print(island, rot=(0, 0, 0), ref=ce.generate_unibody(p)), uni) < 0.01
+
+
+@pytest.mark.parametrize("pid", OPEN_CUTOUT)
+def test_open_cutout_leaves_no_thin_strips(pid):
+    from shapely.geometry import box
+    p = Preset.load(pid)
+    cut = ce.camera_cutout_poly(p)
+    outer = ce.plate_outline_poly(p, p.tongue_offset)
+    rest = outer.difference(cut)
+    assert rest.geom_type == "Polygon"                         # one backplate, nothing cut loose
+    half = 1.5                                                 # OPEN_CUTOUT_MIN_STRIP / 2
+    assert rest.difference(rest.buffer(-half).buffer(half)).area < 0.5
+    if p.camera.width >= p.W:                                  # full-width plateau: cleared edge to edge
+        top = box(-p.W, p.L / 2 - p.camera.height, p.W, p.L)
+        assert outer.intersection(top).difference(cut).area < 0.01
+
+
+def test_open_cutout_coupon_is_small():
+    c = ce.generate_test_coupon(Preset.load("iphone_17_pro_max"), "camera")
+    assert "CameraRing" not in c["oriented"]
+    assert c["span"][0] <= 41.0 + 1e-6                          # corner piece, not the whole top
+
+
+def test_frame_ring_buttons_memoised_across_pattern_changes():
+    ce.clear_part_cache()
+    a = ce.build_case_parts(_preset("iphone_15_pro", "hex"))["design"]
+    b = ce.build_case_parts(_preset("iphone_15_pro", "dots"))["design"]
+    assert a["frame"] is b["frame"] and a["ring"] is b["ring"]
+    assert a["buttons"][0][1] is b["buttons"][0][1]
+    assert a["plate"] is not b["plate"]
+    q = _preset("iphone_15_pro", "hex")
+    q.camera.x += 1.0                                          # camera moves: ring rebuilt, frame kept
+    assert ce.generate_camera_ring(q) is not a["ring"] and ce.generate_frame(q) is a["frame"]
+    q.style.frame_wall = 1.8                                   # wall changes: frame rebuilt
+    assert ce.generate_frame(q) is not a["frame"]
+
+
+def test_fast_tessellation_matches_build123d():
+    import numpy as np
+    from build123d import Pos, Rot
+    p = _preset("iphone_15_pro", "dots", "inlay")
+    _, inlay = ce.generate_backplate(p)
+    shape = Pos(3, -2, 1) * Rot(0, 90, 0) * inlay
+    v, f = dfm.tessellate(shape, 0.05, 0.3)
+    ref_v, ref_f = shape.tessellate(0.05, 0.3)
+    assert np.allclose(v, [[q.X, q.Y, q.Z] for q in ref_v]) and np.array_equal(f, np.array(ref_f))

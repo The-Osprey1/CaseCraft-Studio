@@ -1,5 +1,5 @@
 {
-  "id": "iphone_16_pro", "name": "iPhone 16 Pro (approx - verify with calipers)",
+  "id": "iphone_16_pro", "name": "iPhone 16 Pro (approx - verify with calipers)", "brand": "Apple", "year": 2024,
   "body": {"length": 149.6, "width": 71.5, "thickness": 8.25, "corner_radius": 11.5},
   "camera": {"x": 4.0, "y": 4.0, "width": 37.0, "height": 38.5, "radius": 9.5},
   "buttons": [

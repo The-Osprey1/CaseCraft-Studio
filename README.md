@@ -4,7 +4,7 @@ An open-source, self-hosted parametric B-Rep phone case generator built with **b
 
 Supports **4-part modular snap-fit printing** (single-extruder and AMS printers), an **experimental multi-toolhead print-in-place** export (toolchanger printers such as the Bambu Lab H3C), a **1-piece single-material unibody**, and **1:1 mm laser-ready SVG** outlines.
 
-> **What CaseCraft verifies, and what it doesn't.** Every export is checked as *geometrically valid* (OpenCascade solids) and *mesh valid* (watertight, consistently wound, 3MF structure checked independently and by lib3mf). CaseCraft does **not** slice your files and has **not** physically fit-tested any device preset. Every shipped preset is labelled *approximate*. Print a fit-test coupon first. See [docs/MANUFACTURING_VERIFICATION.md](docs/MANUFACTURING_VERIFICATION.md).
+> **What CaseCraft verifies, and what it doesn't.** Every export is checked as *geometrically valid* (OpenCascade solids) and *mesh valid* (watertight, consistently wound, 3MF structure checked independently and by lib3mf). CaseCraft does **not** slice your files and has **not** physically fit-tested any device preset. The iPhone 17 family is taken from Apple's dimensional drawings (*dimensions verified*); every other preset is *approximate*. Print a fit-test coupon first. See [docs/MANUFACTURING_VERIFICATION.md](docs/MANUFACTURING_VERIFICATION.md).
 
 ---
 
@@ -15,6 +15,7 @@ Supports **4-part modular snap-fit printing** (single-extruder and AMS printers)
   1. **Bumper Frame (`Frame_TPU`):** printed back-down without supports. 45° ruled lofts (`offset_frustum`) form the retention-groove ceiling and the underside of the screen lip. Port cutouts and captured button pockets are cut into the frame.
   2. **Interchangeable Backplate (`Backplate_PLA`):** a stepped perimeter tongue with a 45° inner lead-in chamfer snaps flush into the TPU groove. Options: an internal **MagSafe magnet-ring pocket** (`54.4 mm` OD / `45.6 mm` ID plus a bottom alignment tail) and backplate patterns.
   3. **Camera Protection Ring (`CameraRing`):** printed bezel-down. It press-fits into the backplate cutout, with corner relief flex slots and a catch bead. Optionally the aperture is **lofted from the camera island's base to a separate outer-opening profile**, for islands wider at the base or flared openings.
+     - **Open camera cut-out (`camera.ring: false`):** for camera islands that reach the phone edge and full-width camera plateaus (the iPhone 17 family), there is no ring. The backplate clears the island by `camera_aperture_margin + camera_ring_clearance`, and the cut-out runs through the backplate edge wherever it would leave a strip under 3 mm, so a plateau becomes a clean full-width notch. The frame is unchanged: its rear lip sits outside the phone outline, so the plateau passes between the walls. Nothing stands proud of the lenses, so the preview reports this.
   4. **Floating Tactile Buttons (`Buttons`):** cap-down rigid inserts, held by an internal retaining flange captured inside the TPU wall pocket.
 - **Toolchanger Print-in-Place (`Toolchanger_InPlace.3mf`) — EXPERIMENTAL, toolchanger printer profiles only:** the frame (`extruder 1`), backplate (`2`), inlay (`3`) and buttons (`2`) are co-registered in their assembled positions. Each export includes `PrintInPlace_Report.txt`, a gap analysis of every co-printed pair. With the default clearances, the backplate sits 0.15 mm from the TPU, and buttons touch their pockets at rest. Those parts will print in contact.
 - **1-Piece Unibody (`Unibody_OnePiece.stl`):** one connected solid built from first principles: the bumper envelope with a solid floor. It is verified on every export as one valid, void-free, self-intersection-free solid and a single watertight mesh body. Single-material adaptations are reported, never silent:
@@ -57,18 +58,27 @@ The preview and `Case_Set.3mf` use the **same layout**. If the parts don't fit, 
 
 ### 4. Fit-Test Coupons
 Coupons are trimmed from the real generator geometry, so dimensional relationships are preserved:
-- **`camera`** (default, unchanged behavior): the camera ring, the backplate snap joint at the camera corner, and the nearest button.
+- **`camera`** (default, unchanged behavior): the camera ring, the backplate snap joint at the camera corner, and the nearest button. With an open camera cut-out: the corner of the cut-out (at most 40 mm wide, even for a full-width plateau), the snap joint and the nearest button.
 - **`buttons`**: the real button windows and flange pockets in the bumper wall, the matching backplate edge, and every button.
 - **`ports`**: the bottom wall with the real charging and speaker openings, plus the matching backplate edge.
 
 To see the print time, slice the coupon. CaseCraft does not estimate print durations.
 
-### 5. Device Library (10 presets, all *approximate*)
+### 5. Device Library (14 presets)
+Every preset has a `brand` and release `year`: the wizard asks for the maker first, then lists that maker's models newest first, with a search box across all makers. Pro mode groups the device list by maker.
+
 Each preset carries optional `verification` metadata: `level` (`approximate` | `dimensionally_verified` | `physically_fit_tested`), `source`, `fit_test`, `notes` and `unverified_features`. The level is shown beside the selected device. Presets without the block still load.
-- Apple: `iphone_15`, `iphone_15_pro`, `iphone_16_pro`, `iphone_16_pro_max`
-- Google: `pixel_8_pro`, `pixel_9_pro`, `pixel_9_pro_xl`
-- Samsung: `galaxy_s24`, `galaxy_s24_ultra`
-- OnePlus: `oneplus_13`
+- Apple, from Apple's accessory dimensional drawings (*dimensions verified*, open camera cut-out, Camera Control opening): `iphone_17`, `iphone_17_pro`, `iphone_17_pro_max`, `iphone_air`
+- Apple (*approximate*): `iphone_15`, `iphone_15_pro`, `iphone_16_pro`, `iphone_16_pro_max`
+- Google (*approximate*): `pixel_8_pro`, `pixel_9_pro`, `pixel_9_pro_xl`
+- Samsung (*approximate*): `galaxy_s24`, `galaxy_s24_ultra`
+- OnePlus (*approximate*): `oneplus_13`
+
+The Galaxy S24, S24 Ultra and OnePlus 13 ship with the MagSafe ring shifted clear of the camera; the iPhone 17 family centres it on the Apple logo, as in Apple's drawings.
+
+**Device editor** (Pro mode, *Device* tab): every measurement is edited against a live front/back sketch that highlights the field in focus. Number fields accept partial input such as `-` or `1.` while typing, flag out-of-range values instead of sending them, and support Enter, Escape and the arrow keys. The tab also covers model name, maker and year, camera mount (press-fit ring or open cut-out), port corner radius and height offset, and how the dimensions were measured. Problems from the CAD validator are listed at the top. The Tolerances sliders only offer values the engine accepts together with the rest of the design.
+
+**Preview speed:** each part is meshed once, at preview resolution, and sent as indexed arrays. On the print bed, parts are placed by offset, so they are not meshed again. The frame, camera ring and buttons don't depend on the pattern, so they are memoised; a pattern change rebuilds only the backplate. A hex preview takes about 1 s after a pattern change (4.4 s before), and the response is about 0.3 MB (5.4 MB before).
 
 ---
 
@@ -148,6 +158,7 @@ python -m pytest                         # full: + B-rep generation, exports, fi
 python cli_test.py --preset iphone_16_pro --pattern voronoi --mode through --magsafe --out out/voronoi
 python cli_test.py --preset iphone_15_pro --pattern hex --mode inlay --printer bambu_h3c --out out/h3c
 python cli_test.py --preset iphone_15_pro --pattern voronoi --edge fade --corner-radius 1.5 --out out/fade
+python cli_test.py --preset iphone_17_pro --pattern hex --mode through --out out/plateau   # open camera cut-out
 python cli_test.py --preset iphone_16_pro --coupon --coupon-type buttons --out out/coupon
 
 # Independent 3MF validation (+ lib3mf strict mode when installed)
@@ -172,7 +183,7 @@ casecraft/
 ├── verify_3mf.py          # independent 3MF validator, lib3mf cross-check, reference fixtures
 ├── verify.py              # B-rep / mesh checks (one piece, voids, self-intersection, watertight)
 ├── print_in_place.py      # co-printed part relationships + directional gap probes (experimental)
-├── dfm.py                 # overhang/bridge DFM analyzer on Z-up print meshes
+├── dfm.py                 # fast tessellation (numpy) + overhang/bridge DFM analyzer on Z-up print meshes
 ├── safe_ops.py            # clamped fillet/chamfer guards for OpenCascade stability
 ├── server.py              # FastAPI API (/presets, /user-presets, /printers, /patterns, /pattern-preview, /generate-preview, /export-zip, /export-part)
 ├── appdirs.py             # bundled-resource vs per-user paths (works frozen), atomic writes
@@ -181,7 +192,7 @@ casecraft/
 ├── desktop/               # Windows app: launcher, JS bridge, PyInstaller spec, installer, build + smoke test
 ├── cli_test.py            # headless CAD + export verification gate
 ├── test_*.py              # pytest suites (fast + slow)
-├── presets/               # 10 JSON phone presets (approximate)
+├── presets/               # 14 JSON phone presets (brand, year, verification level)
 ├── schema/                # JSON Schema (documentation; params.py is authoritative)
 ├── docs/                  # manufacturing verification guide, implementation report
 └── web/                   # React + Vite + Tailwind + @react-three/fiber UI

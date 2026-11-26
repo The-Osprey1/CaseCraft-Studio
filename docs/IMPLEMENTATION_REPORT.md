@@ -173,6 +173,95 @@ The manual UI check confirmed:
 
 Note: `dots` and `triangles` backplates take ~1.2 s, the slowest lattices and closest to the 1.5 s local timing budget.
 
+### Milestone G: iPhone 17 family, brand-first device picker, device editor, preview speed
+- **iPhone 17, 17 Pro, 17 Pro Max and Air presets** from Apple's accessory dimensional drawings (dated 2025-09-09):
+  - Labelled dimensions give the body, button and port positions and the MagSafe centre (the Apple logo).
+  - The camera plateau extents were scaled off the drawings' vector geometry at 2.074 pt/mm. Checked against Apple's labelled lens positions, the error is under 0.2 mm.
+  - The presets are `dimensionally_verified`, with `camera` listed as unverified, and `fit_test: untested`.
+  - Camera Control is an opening, as Apple's guidelines require of cases that don't use Apple's Camera Control interface.
+  - On the 5.64 mm Air, the USB-C opening is capped at 5.2 mm. Apple's 6.6 mm keep-out is taller than the side wall allows.
+- **Open camera cut-out (`camera.ring: false`):** the 17 Pro, Pro Max and Air have a full-width plateau 2.55–3.03 mm proud of the back glass, more than the 1.8 mm backplate. The iPhone 17's island sits 1.18 mm from the edge. Neither leaves room for the press-fit ring. With the open mode:
+  - the backplate clears the island by `camera_aperture_margin + camera_ring_clearance`
+  - any plate strip under 3 mm left beside the cut-out is removed (a morphological opening), so the cut-out opens through the edge with no slivers
+  - no ring part is made; preview, exports, 3MF writers, print-in-place, coupons, unibody and CLI all handle its absence
+  - the frame needs no change: its rear lip sits outside the phone outline (offset ≥ 0.55 mm), so the plateau passes between the walls
+  - validation keeps the island within the outline and requires it to cover no more than half the back; the ring rules now point to the open mode
+- **Brand-first device picker:** presets carry `brand` and `year`. The wizard shows makers first, then that maker's models newest first, with a search across makers. Pro mode groups the device list by maker.
+- **Device editor** (Pro mode, *Device* tab, moved out of `App.jsx` into `DeviceEditor.jsx`):
+  - a live front/back sketch (`DeviceDiagram.jsx`) that highlights the field in focus
+  - model name, maker and year
+  - camera mount choice
+  - the previously missing port corner radius and height offset
+  - a measurement-provenance section
+  - CAD validation problems listed at the top
+- **Number fields (`Fields.jsx`)** previously reset on any non-number, so a negative port centre could not be typed, and every keystroke went to the CAD engine. They now:
+  - keep the text as typed
+  - commit only valid, in-range values
+  - flag problems inline
+  - support Enter, Escape and the arrow keys
+  The preview key also leaves out name, maker, year and provenance, so renaming a device no longer rebuilds the CAD model.
+- **Tolerance sliders** offer only values the engine accepts together with the rest of the design (`fitLimits.js`, mirroring the `params.py` rules). Before, a 1.4 mm wall, a 2.0 mm screen lip or a 1.2 mm groove went straight to "invalid design".
+- **Preview pipeline:**
+  - The frame, camera ring and buttons are memoised on exactly the parameters they read (`cad_engine.part_key`).
+  - Each part is meshed once, at 0.05 mm / 0.3 rad. Meshes are read straight into numpy (`dfm.tessellate`), giving the same triangulation as build123d 2–3× faster.
+  - Meshes are sent as indexed little-endian arrays instead of two base64 STLs per part. The bed view places parts by offset, so they aren't meshed again, and buttons carry their own small bed mesh.
+  - The Case_Set layout is computed from those meshes (`bambu_3mf.set_objects_from_meshes`, same objects and packing).
+  - B-rep cut tools follow the 2D outlines within 0.02 mm (`CUT_TOL`); the 2D geometry, checks, preview and laser SVG are unchanged.
+  - An untrimmed MagSafe pocket is cut with true circles: 53 plate faces instead of 435, and the same volume within 0.02 %. MagSafe backplates build in 0.6–1.1 s instead of 1.0–1.6 s.
+- **Fixes found while doing this:**
+  - MagSafe failed in every mode on the Galaxy S24, S24 Ultra and OnePlus 13: the centred ring hit the camera. Each preset now ships with the ring shifted just clear (−3, −5, −11 mm).
+  - The Galaxy S24's approximate speaker opening ran 27 mm into a corner whose straight edge ends at 23.3 mm. The cutter sliced obliquely through the curved wall and left a 2 mm unsupported roof, so the frame failed the support-free check (this already failed before G). It is now 10 mm wide at 18 mm, and the warning explains the consequence.
+  - `Preset.from_dict` now rejects non-list `buttons`/`ports` and non-object sections with a clear message instead of a type error. It also checks the top-level `id`/`name`/`brand`/`year` types.
+  - Small UI fixes:
+    - the laser SVG skips non-polygon fragments
+    - the sticky pattern card is compact on short windows
+    - the camera cut-out shows as an opening in the 2D previews
+    - the Camera Ring pill and export appear only when there is a ring
+
+**Preview timings** (`_build_preview`, iPhone 15 Pro unless noted; Windows 11, Python 3.12):
+
+| Design | Before G | After G, first build | After G, pattern change | Payload before → after |
+|---|---|---|---|---|
+| hex, through | 4.37 s | 1.96 s | 1.08 s | 5.37 → 0.32 MB |
+| text, through | 9.80 s | 2.35 s | 0.61 s | 5.90 → 0.25 MB |
+| dots, inlay | 11.42 s | 2.43 s | 1.54 s | 26.23 → 1.60 MB |
+| iPhone 17 Pro, hex, through | — | 1.60 s | 0.86 s | 0.24 MB |
+
+The "pattern change" column is a rebuild with the frame, ring and buttons cached, as when only the pattern changes in the UI.
+
+**Sweep:** every preset × pattern type × mode × border × MagSafe on/off (1,160 validation and 2D variants) found only the MagSafe clash above, before the fix. A full 3D sweep (13 designs per preset: preview, unibody, three coupons) found no CAD errors. After the fixes, the four new presets plus the three MagSafe presets and the default show zero problems.
+
+**Milestone G results** (2026-11-22, Windows 11, Python 3.12):
+
+| Command | Result |
+|---|---|
+| `python -m pytest` | **220 passed**, 0 failed, 0 skipped (2 m 57 s) |
+| `cli_test.py --preset iphone_17_pro --pattern hex --mode through` | **49/49** (open cut-out: no ring, plate one piece, plateau footprint clear of plate and frame) |
+| `cli_test.py --preset iphone_17_pro_max --pattern text --mode inlay --printer bambu_h3c` | **64/64** |
+| `cli_test.py --preset iphone_air --pattern solid --mode through --magsafe` | **48/48** |
+| `cli_test.py --preset iphone_17 --pattern voronoi --mode through --magsafe` | **49/49**; backplate 1.03 s |
+| `cli_test.py --preset galaxy_s24 --pattern hex --mode through --magsafe` | **50/50** (support-free frame after the speaker fix; failed before G) |
+| `cli_test.py --preset oneplus_13 --pattern waves --mode deboss --magsafe` | **52/52**; backplate 1.08 s (1.64 s before the exact MagSafe cutter) |
+| `cli_test.py --preset iphone_16_pro --pattern voronoi --mode through --magsafe` | **56/56**; backplate 0.62 s |
+| `cli_test.py --preset iphone_15_pro --pattern hex --mode through` | **54/54** (ring mode unchanged) |
+| `cli_test.py --coupon`: `iphone_17_pro` camera, `iphone_air` ports, `iphone_17` buttons | **22/22**, **17/17**, **47/47** |
+| Tolerance slider ranges (`fitLimits.js`) | all 252 endpoints (14 presets × 9 sliders × min/max) pass `Preset.check()` |
+| `cd web && npm run build` | builds; entry chunk 259 kB, lazy 3D chunk 898 kB |
+
+The browser check (built app on uvicorn, in-app browser) confirmed:
+- **Picker:** makers first (Apple 8, Google 3, Samsung 2, OnePlus 1), Apple's 2025 models first, then their models; Pro mode lists devices grouped by maker.
+- **iPhone 17 Pro and Pro Max:**
+  - the back view shows the backplate stopping below the open plateau, with no Camera Ring part
+  - a hex pattern stays clear of the plateau (125 cut-outs, "Prints as one piece")
+  - a pattern change rebuilt with the frame cached ("frame 0s · plate 0.91s · mesh 0.10s")
+- **Device editor:**
+  - the sketch matches the drawing values (Camera Control centred 98.4 mm from the top)
+  - typing "1" into the length shows "Minimum 80 mm" and isn't sent; "152.5" commits; a negative port centre can be typed and commits on Enter
+  - the focused port is highlighted on the sketch
+  - switching the 17 Pro to a press-fit ring lists the validation message, which points to the open cut-out
+- **Tolerances:** sliders show the accepted ranges (wall 1.55–2.4 mm, groove 0.65–0.95 mm, lip 0.6–1.5 mm).
+- **Errors:** no console errors besides the deliberate 422 above; no server errors.
+
 ## B. File-level change summary
 
 **Modified:**
@@ -198,6 +287,18 @@ Note: `dots` and `triangles` backplates take ~1.2 s, the slowest lattices and cl
 **Milestone F:**
 - Created: `patterns.py`, `test_patterns.py`, `web/src/hooks/{usePatternSpecs,usePatternRequest}.js`, `web/src/components/{PatternPreviewCard,PlatePreview,ViewportToolbar}.jsx`
 - Modified: `cad_engine.py` (2D code moved out), `params.py`, `schema/phone_preset.schema.json`, `server.py`, `cli_test.py`, `test_geometry.py`, `web/src/{App,constants}.jsx`, `web/src/components/{Fields,PatternControls,Viewport3D}.jsx`, `web/vite.config.js`, `README.md`, this report
+
+**Milestone G:**
+- Created:
+  - presets `presets/{iphone_17,iphone_17_pro,iphone_17_pro_max,iphone_air}.json`
+  - components `web/src/components/{DevicePicker,DeviceEditor,DeviceDiagram}.jsx`
+  - `web/src/fitLimits.js`
+- Modified:
+  - engine: `params.py` (`camera.ring`, `brand`, `year`, rules), `patterns.py` (open cut-out, MagSafe constants), `cad_engine.py` (open cut-out, part memo, `print_offset`, `laser_svg_text`, `CUT_TOL`, exact MagSafe cutter), `dfm.py` (`tessellate`), `bambu_3mf.py` (`set_objects_from_meshes`, optional ring), `print_in_place.py`, `server.py` (preview pipeline, ring-less export message, camera finding), `cli_test.py`
+  - presets: all 10 existing (brand and year; MagSafe offsets on Galaxy S24, S24 Ultra and OnePlus 13; Galaxy S24 speaker), `schema/phone_preset.schema.json`
+  - frontend: `web/src/{App.jsx,api.js}`, `web/src/components/{Fields,Viewport3D,PlatePreview,PatternPreviewCard}.jsx`
+  - tests: `test_api.py`, `test_validation.py`, `test_geometry.py`, `test_desktop.py`, `test_regressions.py`, `test_printer_export.py`
+  - docs: `README.md`, this report
 
 ## C. Testing results
 
@@ -260,6 +361,8 @@ The manual UI check confirmed:
 - **Unibody camera:** the surround is flush, with no raised lens guard, and the case is flexible single material by design.
 - **H3C dimensions** come from secondary sources (the manufacturer page returned 403).
 - **Camera envelope** supports one rounded-rectangle base and one outer opening, with a ruled loft only. It does not model the bump height or multiple islands.
+- **Open camera cut-out has no lens guard.** On the iPhone 17 Pro, Pro Max and Air the plateau stands 0.75–1.23 mm proud of the case back, and the lens rings a further 1.88 mm or more. The modular case leaves the plateau open: the frame prints back-down, so it cannot grow a raised rim around the plateau without supports.
+- **Camera plateaus are modelled as a full-width band** down to their lowest point (48.9 mm on the 17 Pro/Pro Max, 34.4 mm on the Air). Where the real plateau edge curves up, the case over-cuts slightly, which is safe for fit.
 - **Text patterns on Linux CI** depend on system fonts. Arial is substituted, via `fonts-liberation`, which can shift text metrics slightly from Windows.
 - **CI covers one platform.** GitHub Actions runs on Ubuntu with Python 3.12 only. Windows is checked only by the local runs above. The workflow's actions (`checkout@v4`, `setup-python@v5`, `setup-node@v4`, `upload-artifact@v4`) target the deprecated Node.js 20 runtime and should be upgraded.
 - **Server CAD is serialized** by a single lock. Abandoned preview requests are now skipped, but a single slow request still blocks others.
@@ -282,6 +385,8 @@ See [MANUFACTURING_VERIFICATION.md](MANUFACTURING_VERIFICATION.md#manual-checkli
 4. **Camera bump height in the preset**, so the ring and unibody can warn when the lens protrudes past the bezel.
 5. **Trim the Three.js chunk.** Milestone F lazy-loads the viewer (entry ~245 kB), but the 3D chunk is still ~900 kB; importing only the used drei helpers would shrink it.
 6. **Physical prints of the new patterns,** especially `fade` and `corner_radius`, to confirm that the 2 mm² smallest faded cell and the rounded corners hold up on a real FDM print.
+7. **Fit-test the iPhone 17 family** (camera and buttons coupons), then decide whether a clip-on plateau guard is worth adding for lens protection.
+8. **Newer Android presets** (Galaxy S25 series, Pixel 10 series) from the makers' dimensional data where it is published.
 
 ## External references consulted
 

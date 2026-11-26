@@ -1,18 +1,8 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  Box,
-  Check,
-  Download,
-  Loader2,
-  Palette,
-  Plus,
-  Sliders,
-  Smartphone,
-  Sparkles,
-  Trash2,
-  Wand2,
-} from "lucide-react";
+import { Box, Check, Download, Loader2, Palette, Sliders, Smartphone, Sparkles, Wand2 } from "lucide-react";
 import CrossSectionDiagram from "./components/CrossSectionDiagram.jsx";
+import DeviceEditor from "./components/DeviceEditor.jsx";
+import DevicePicker, { deviceBrand } from "./components/DevicePicker.jsx";
 import PatternControls from "./components/PatternControls.jsx";
 import PatternPreviewCard from "./components/PatternPreviewCard.jsx";
 import ViewportToolbar from "./components/ViewportToolbar.jsx";
@@ -21,7 +11,8 @@ import usePatternRequest from "./hooks/usePatternRequest.js";
 import ValidationStatus, { validationState } from "./components/ValidationStatus.jsx";
 import DeviceBadge from "./components/DeviceBadge.jsx";
 import PrinterSelect from "./components/PrinterSelect.jsx";
-import { NumberField, SliderField } from "./components/Fields.jsx";
+import { SliderField } from "./components/Fields.jsx";
+import { fitLimits } from "./fitLimits.js";
 import {
   BAMBU_SWATCHES,
   CALIBRATION_PROFILES,
@@ -33,7 +24,6 @@ import usePreview from "./hooks/usePreview.js";
 import useExports from "./hooks/useExports.js";
 import useProject from "./hooks/useProject.js";
 import FileMenu from "./components/FileMenu.jsx";
-import FilePickButton from "./components/FilePickButton.jsx";
 import { apiFetch, downloadBlob, postJson } from "./api.js";
 import { IS_DESKTOP, call, confirmAction, saveTextFile } from "./desktop.js";
 
@@ -311,15 +301,23 @@ export default function App() {
     saveText(`${config.id}_Laser_Backplate.svg`, preview.laser_svg, "image/svg+xml");
   };
 
-  const setCameraOpening = (key, value) =>
-    updateConfig((c) => {
-      c.camera.opening = { width: 0, height: 0, radius: 0, dx: 0, dy: 0, ...(c.camera.opening || {}), [key]: value };
-      return c;
-    });
-
   const hasInlay = Boolean(
     preview?.summary?.has_inlay ||
       preview?.parts?.some((p) => p.group === "inlay")
+  );
+  // slider ranges the engine accepts together with the rest of the design (params.py rules)
+  const limits = useMemo(() => (config ? fitLimits(config) : null), [config]);
+  // devices with an open camera cut-out (iPhone 17 family, camera plateaus) have no ring part:
+  // exports follow the config, the viewport's part pills follow the model on screen
+  const hasRing = config?.camera?.ring !== false;
+  const shownRing = preview ? preview.summary?.has_camera_ring !== false : hasRing;
+  // parameter warnings for the device editor; the last preview's are fine while a new one builds
+  const deviceWarnings = useMemo(
+    () =>
+      (preview?.findings || [])
+        .filter((f) => f.level === "warning" && f.source === "parameters")
+        .map((f) => f.message),
+    [preview]
   );
 
   return (
@@ -468,69 +466,19 @@ export default function App() {
                     {wizardStep === 1 && (
                       <div className="space-y-4">
                         <div>
-                          <h2 className="text-sm font-semibold text-white">
-                            Choose Your Phone Model
-                          </h2>
+                          <h2 className="text-sm font-semibold text-white">Choose your phone</h2>
                           <p className="mt-0.5 text-xs text-slate-400">
-                            Pre-calibrated case dimensions, tactile button pockets, and camera guard.
+                            Pick the maker, then the model: case dimensions, button pockets and camera opening come with it.
                           </p>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-2.5">
-                          {presets.map((p) => {
-                            const isSelected = config.id === p.id;
-                            return (
-                              <button
-                                key={p.id}
-                                type="button"
-                                onClick={() => handleSelectPreset(p.id)}
-                                className={`group flex flex-col justify-between rounded-xl border p-3.5 text-left transition-all ${
-                                  isSelected
-                                    ? "border-cyan-400 bg-cyan-500/10 ring-1 ring-cyan-400/25"
-                                    : "border-slate-800 bg-slate-900/70 hover:border-slate-700 hover:bg-slate-800/40"
-                                }`}
-                              >
-                                <div className="flex items-start justify-between gap-2">
-                                  {/* Mini phone silhouette icon */}
-                                  <div
-                                    className={`flex h-12 w-8 shrink-0 flex-col justify-between rounded-lg border-2 p-1 transition ${
-                                      isSelected
-                                        ? "border-cyan-400 bg-cyan-950/50"
-                                        : "border-slate-700 bg-slate-950/70 group-hover:border-slate-500"
-                                    }`}
-                                  >
-                                    <div
-                                      className={`h-3 w-3 rounded-sm ${
-                                        isSelected ? "bg-cyan-400/80" : "bg-slate-600"
-                                      }`}
-                                    />
-                                    <div className="mx-auto h-0.5 w-3 rounded-full bg-slate-700" />
-                                  </div>
-                                  {isSelected && (
-                                    <span className="rounded-full border border-cyan-400/30 bg-cyan-400/20 px-2 py-0.5 text-[10px] font-semibold text-cyan-300">
-                                      Active
-                                    </span>
-                                  )}
-                                </div>
-
-                                <div className="mt-3">
-                                  <div className="text-xs font-semibold text-white group-hover:text-cyan-200 transition">
-                                    {cleanDeviceName(p.name)}
-                                  </div>
-                                  <div className="mt-0.5 font-mono text-[11px] text-slate-400">
-                                    {p.body.length} × {p.body.width} × {p.body.thickness} mm
-                                  </div>
-                                  <DeviceBadge verification={p.verification} className="mt-1.5 inline-block" />
-                                  {userPresetIds.includes(p.id) && (
-                                    <span className="ml-1.5 mt-1.5 inline-block rounded-full border border-violet-400/30 bg-violet-400/10 px-1.5 py-0.5 text-[10px] font-medium text-violet-300">
-                                      My device
-                                    </span>
-                                  )}
-                                </div>
-                              </button>
-                            );
-                          })}
-                        </div>
+                        <DevicePicker
+                          presets={presets}
+                          userPresetIds={userPresetIds}
+                          activeId={config.id}
+                          activeBrand={deviceBrand(config, userPresetIds)}
+                          onSelect={handleSelectPreset}
+                        />
 
                         <div className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900/80 p-3.5">
                           <div>
@@ -637,7 +585,7 @@ export default function App() {
                               { key: "frame", label: "Bumper (TPU)" },
                               { key: "backplate", label: "Backplate" },
                               { key: "inlay", label: "AMS Inlay" },
-                              { key: "camera_ring", label: "Camera Ring" },
+                              ...(hasRing ? [{ key: "camera_ring", label: "Camera Ring" }] : []),
                               { key: "buttons", label: "Buttons" },
                             ].map((p) => (
                               <label
@@ -835,7 +783,7 @@ export default function App() {
                               { key: "backplate_3mf", label: "Backplate .3MF", file: "Backplate.3mf" },
                               { key: "frame_stl", label: "Frame .STL", file: "Frame_TPU.stl" },
                               { key: "buttons_stl", label: "Buttons .STL", file: "Buttons.stl" },
-                              { key: "ring_stl", label: "Camera Ring .STL", file: "CameraRing.stl" },
+                              ...(hasRing ? [{ key: "ring_stl", label: "Camera Ring .STL", file: "CameraRing.stl" }] : []),
                               { key: "laser_svg", label: "Laser .SVG", file: "Laser_Backplate.svg" },
                             ].map((item) => (
                               <button
@@ -897,7 +845,7 @@ export default function App() {
             <>
               <div className="grid grid-cols-4 border-b border-slate-800 bg-slate-950/60 text-[11px] font-medium">
                 {[
-                  { id: "calipers", label: "Calipers", icon: Smartphone },
+                  { id: "calipers", label: "Device", icon: Smartphone },
                   { id: "tolerances", label: "Tolerances", icon: Sliders },
                   { id: "pattern", label: "Pattern", icon: Sparkles },
                   { id: "colors", label: "Colors", icon: Palette },
@@ -925,489 +873,24 @@ export default function App() {
                   </div>
                 ) : (
                   <>
-                    {/* PRO TAB 1: CALIPERS */}
+                    {/* PRO TAB 1: DEVICE (the phone itself, edited against a live sketch) */}
                     {proTab === "calipers" && (
-                      <div className="space-y-5">
-                        <div className="space-y-2">
-                          <div className="flex items-center justify-between">
-                            <label className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                              Base Device Preset
-                            </label>
-                            <div className="flex items-center gap-1.5">
-                              <FilePickButton
-                                accept=".json,application/json"
-                                extensions={[".json"]}
-                                onText={handleImportPresetJson}
-                                onError={setError}
-                                className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-[11px] text-slate-300 hover:border-cyan-500"
-                              >
-                                Import JSON
-                              </FilePickButton>
-                              <button
-                                type="button"
-                                onClick={handleExportPresetJson}
-                                className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-[11px] text-cyan-300 hover:border-cyan-500"
-                              >
-                                Export JSON
-                              </button>
-                            </div>
-                          </div>
-                          <select
-                            value={config.id}
-                            onChange={(e) => handleSelectPreset(e.target.value)}
-                            className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs font-medium text-slate-100 outline-none focus:border-cyan-500"
-                          >
-                            {!presets.some((p) => p.id === config.id) && (
-                              <option value={config.id}>{cleanDeviceName(config.name)} (unsaved)</option>
-                            )}
-                            <optgroup label="Built-in devices">
-                              {presets
-                                .filter((p) => !userPresetIds.includes(p.id))
-                                .map((p) => (
-                                  <option key={p.id} value={p.id}>
-                                    {cleanDeviceName(p.name)}
-                                  </option>
-                                ))}
-                            </optgroup>
-                            {userPresetIds.length > 0 && (
-                              <optgroup label="My devices">
-                                {presets
-                                  .filter((p) => userPresetIds.includes(p.id))
-                                  .map((p) => (
-                                    <option key={p.id} value={p.id}>
-                                      {p.name}
-                                    </option>
-                                  ))}
-                              </optgroup>
-                            )}
-                          </select>
-                          {deviceName === null ? (
-                            <div className="flex items-center gap-1.5">
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setDeviceName(
-                                    userPresetIds.includes(config.id) ? config.name : `My ${cleanDeviceName(config.name)}`
-                                  )
-                                }
-                                className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-[11px] text-violet-300 hover:border-violet-400"
-                              >
-                                Save as my device…
-                              </button>
-                              {userPresetIds.includes(config.id) && (
-                                <button
-                                  type="button"
-                                  onClick={handleDeleteDevice}
-                                  className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-[11px] text-rose-300 hover:border-rose-400"
-                                >
-                                  Delete my device
-                                </button>
-                              )}
-                            </div>
-                          ) : (
-                            <form
-                              className="flex items-center gap-1.5"
-                              onSubmit={(e) => {
-                                e.preventDefault();
-                                handleSaveDevice();
-                              }}
-                            >
-                              <input
-                                autoFocus
-                                value={deviceName}
-                                maxLength={80}
-                                onChange={(e) => setDeviceName(e.target.value)}
-                                onKeyDown={(e) => e.key === "Escape" && setDeviceName(null)}
-                                placeholder="Device name"
-                                className="min-w-0 flex-1 rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[11px] text-slate-100 outline-none focus:border-violet-400"
-                              />
-                              <button
-                                type="submit"
-                                disabled={!deviceName.trim()}
-                                className="rounded bg-violet-500 px-2 py-1 text-[11px] font-semibold text-white disabled:opacity-50"
-                              >
-                                Save
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setDeviceName(null)}
-                                className="rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-300"
-                              >
-                                Cancel
-                              </button>
-                            </form>
-                          )}
-                        </div>
-
-                        <section className="space-y-2.5">
-                          <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-300">
-                            Body Caliper Dimensions
-                          </h2>
-                          <div className="grid grid-cols-2 gap-2.5">
-                            <NumberField
-                              label="Length (L)"
-                              value={config.body.length}
-                              min={80}
-                              max={220}
-                              onChange={(v) =>
-                                updateConfig((c) => {
-                                  c.body.length = v;
-                                  return c;
-                                })
-                              }
-                            />
-                            <NumberField
-                              label="Width (W)"
-                              value={config.body.width}
-                              min={50}
-                              max={120}
-                              onChange={(v) =>
-                                updateConfig((c) => {
-                                  c.body.width = v;
-                                  return c;
-                                })
-                              }
-                            />
-                            <NumberField
-                              label="Thickness (T)"
-                              value={config.body.thickness}
-                              min={4}
-                              max={20}
-                              step={0.05}
-                              onChange={(v) =>
-                                updateConfig((c) => {
-                                  c.body.thickness = v;
-                                  return c;
-                                })
-                              }
-                            />
-                            <NumberField
-                              label="Corner Radius (R)"
-                              value={config.body.corner_radius}
-                              min={0}
-                              max={35}
-                              onChange={(v) =>
-                                updateConfig((c) => {
-                                  c.body.corner_radius = v;
-                                  return c;
-                                })
-                              }
-                            />
-                          </div>
-                        </section>
-
-                        <section className="space-y-2.5">
-                          <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-300">
-                            Camera Island (Back Top-Left Origin)
-                          </h2>
-                          <div className="grid grid-cols-3 gap-2">
-                            <NumberField
-                              label="X Offset"
-                              value={config.camera.x}
-                              min={0}
-                              onChange={(v) =>
-                                updateConfig((c) => {
-                                  c.camera.x = v;
-                                  return c;
-                                })
-                              }
-                            />
-                            <NumberField
-                              label="Y Offset"
-                              value={config.camera.y}
-                              min={0}
-                              onChange={(v) =>
-                                updateConfig((c) => {
-                                  c.camera.y = v;
-                                  return c;
-                                })
-                              }
-                            />
-                            <NumberField
-                              label="Radius"
-                              value={config.camera.radius}
-                              min={0}
-                              onChange={(v) =>
-                                updateConfig((c) => {
-                                  c.camera.radius = v;
-                                  return c;
-                                })
-                              }
-                            />
-                          </div>
-                          <div className="grid grid-cols-2 gap-2.5">
-                            <NumberField
-                              label="Camera Width"
-                              value={config.camera.width}
-                              min={5}
-                              onChange={(v) =>
-                                updateConfig((c) => {
-                                  c.camera.width = v;
-                                  return c;
-                                })
-                              }
-                            />
-                            <NumberField
-                              label="Camera Height"
-                              value={config.camera.height}
-                              min={5}
-                              onChange={(v) =>
-                                updateConfig((c) => {
-                                  c.camera.height = v;
-                                  return c;
-                                })
-                              }
-                            />
-                          </div>
-                          <label className="flex cursor-pointer items-center gap-2 text-[11px] text-slate-300">
-                            <input
-                              type="checkbox"
-                              checked={Boolean(config.camera.opening)}
-                              onChange={(e) =>
-                                updateConfig((c) => {
-                                  c.camera.opening = e.target.checked
-                                    ? { width: c.camera.width, height: c.camera.height, radius: c.camera.radius, dx: 0, dy: 0 }
-                                    : null;
-                                  return c;
-                                }, true)
-                              }
-                              className="accent-cyan-400"
-                            />
-                            Separate outer-opening profile (island wider at its base, or flared opening)
-                          </label>
-                          {config.camera.opening && (
-                            <div className="grid grid-cols-3 gap-2 rounded-lg border border-slate-800 bg-slate-950/50 p-2">
-                              {[
-                                ["width", "Opening W"],
-                                ["height", "Opening H"],
-                                ["radius", "Opening R"],
-                                ["dx", "Shift X"],
-                                ["dy", "Shift Y"],
-                              ].map(([k, label]) => (
-                                <NumberField
-                                  key={k}
-                                  label={label}
-                                  value={config.camera.opening[k]}
-                                  onChange={(v) => setCameraOpening(k, v)}
-                                />
-                              ))}
-                              <p className="col-span-3 text-[10px] text-slate-500">
-                                Width/Height above = island at its base; this is the clear opening at the outer face. Shift is measured on the back view (+X right, +Y down).
-                              </p>
-                            </div>
-                          )}
-                        </section>
-
-                        {/* Floating Buttons */}
-                        <section className="space-y-2">
-                          <div className="flex items-center justify-between">
-                            <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-300">
-                              Floating Buttons ({config.buttons.length})
-                            </h2>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                updateConfig((c) => {
-                                  c.buttons.push({
-                                    id: `btn_${c.buttons.length + 1}`,
-                                    side: "right",
-                                    pos: 65,
-                                    length: 12,
-                                  });
-                                  return c;
-                                }, true)
-                              }
-                              className="flex items-center gap-1 rounded border border-slate-700 px-2 py-0.5 text-[11px] text-cyan-300 hover:bg-slate-800"
-                            >
-                              <Plus className="h-3 w-3" /> Add Button
-                            </button>
-                          </div>
-                          <div className="space-y-2">
-                            {config.buttons.map((b, idx) => (
-                              <div
-                                key={`${b.id}-${idx}`}
-                                className="space-y-2 rounded-lg border border-slate-800 bg-slate-950/60 p-2.5"
-                              >
-                                <div className="flex items-center gap-2">
-                                  <input
-                                    value={b.id}
-                                    onChange={(e) =>
-                                      updateConfig((c) => {
-                                        c.buttons[idx].id = e.target.value;
-                                        return c;
-                                      })
-                                    }
-                                    className="w-24 rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-xs text-slate-100"
-                                  />
-                                  <select
-                                    value={b.side}
-                                    onChange={(e) =>
-                                      updateConfig((c) => {
-                                        c.buttons[idx].side = e.target.value;
-                                        return c;
-                                      }, true)
-                                    }
-                                    className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-xs text-slate-200"
-                                  >
-                                    <option value="right">right</option>
-                                    <option value="left">left</option>
-                                    <option value="top">top</option>
-                                    <option value="bottom">bottom</option>
-                                  </select>
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      updateConfig((c) => {
-                                        c.buttons.splice(idx, 1);
-                                        return c;
-                                      }, true)
-                                    }
-                                    className="ml-auto text-slate-500 hover:text-rose-400"
-                                  >
-                                    <Trash2 className="h-3.5 w-3.5" />
-                                  </button>
-                                </div>
-                                <div className="grid grid-cols-2 gap-2">
-                                  <NumberField
-                                    label="Pos from Top/Left"
-                                    value={b.pos}
-                                    step={0.5}
-                                    onChange={(v) =>
-                                      updateConfig((c) => {
-                                        c.buttons[idx].pos = v;
-                                        return c;
-                                      })
-                                    }
-                                  />
-                                  <NumberField
-                                    label="Length"
-                                    value={b.length}
-                                    step={0.5}
-                                    onChange={(v) =>
-                                      updateConfig((c) => {
-                                        c.buttons[idx].length = v;
-                                        return c;
-                                      })
-                                    }
-                                  />
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </section>
-
-                        {/* Ports */}
-                        <section className="space-y-2">
-                          <div className="flex items-center justify-between">
-                            <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-300">
-                              Bottom / Side Ports ({config.ports.length})
-                            </h2>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                updateConfig((c) => {
-                                  c.ports.push({
-                                    id: `port_${c.ports.length + 1}`,
-                                    side: "bottom",
-                                    center: 0,
-                                    width: 10,
-                                    height: 5,
-                                    radius: 2,
-                                    z_offset: 0,
-                                  });
-                                  return c;
-                                }, true)
-                              }
-                              className="flex items-center gap-1 rounded border border-slate-700 px-2 py-0.5 text-[11px] text-cyan-300 hover:bg-slate-800"
-                            >
-                              <Plus className="h-3 w-3" /> Add Port
-                            </button>
-                          </div>
-                          <div className="space-y-2">
-                            {config.ports.map((pt, idx) => (
-                              <div
-                                key={`${pt.id}-${idx}`}
-                                className="space-y-2 rounded-lg border border-slate-800 bg-slate-950/60 p-2.5"
-                              >
-                                <div className="flex items-center gap-2">
-                                  <input
-                                    value={pt.id}
-                                    onChange={(e) =>
-                                      updateConfig((c) => {
-                                        c.ports[idx].id = e.target.value;
-                                        return c;
-                                      })
-                                    }
-                                    className="w-24 rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-xs text-slate-100"
-                                  />
-                                  <select
-                                    value={pt.side}
-                                    onChange={(e) =>
-                                      updateConfig((c) => {
-                                        c.ports[idx].side = e.target.value;
-                                        return c;
-                                      }, true)
-                                    }
-                                    className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-xs text-slate-200"
-                                  >
-                                    <option value="bottom">bottom</option>
-                                    <option value="top">top</option>
-                                    <option value="left">left</option>
-                                    <option value="right">right</option>
-                                  </select>
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      updateConfig((c) => {
-                                        c.ports.splice(idx, 1);
-                                        return c;
-                                      }, true)
-                                    }
-                                    className="ml-auto text-slate-500 hover:text-rose-400"
-                                  >
-                                    <Trash2 className="h-3.5 w-3.5" />
-                                  </button>
-                                </div>
-                                <div className="grid grid-cols-3 gap-2">
-                                  <NumberField
-                                    label="Center"
-                                    value={pt.center}
-                                    step={0.5}
-                                    onChange={(v) =>
-                                      updateConfig((c) => {
-                                        c.ports[idx].center = v;
-                                        return c;
-                                      })
-                                    }
-                                  />
-                                  <NumberField
-                                    label="Width"
-                                    value={pt.width}
-                                    step={0.5}
-                                    onChange={(v) =>
-                                      updateConfig((c) => {
-                                        c.ports[idx].width = v;
-                                        return c;
-                                      })
-                                    }
-                                  />
-                                  <NumberField
-                                    label="Height"
-                                    value={pt.height}
-                                    step={0.5}
-                                    onChange={(v) =>
-                                      updateConfig((c) => {
-                                        c.ports[idx].height = v;
-                                        return c;
-                                      })
-                                    }
-                                  />
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </section>
-                      </div>
+                      <DeviceEditor
+                        config={config}
+                        presets={presets}
+                        userPresetIds={userPresetIds}
+                        updateConfig={updateConfig}
+                        onSelectPreset={handleSelectPreset}
+                        onImport={handleImportPresetJson}
+                        onExport={handleExportPresetJson}
+                        onError={setError}
+                        deviceName={deviceName}
+                        setDeviceName={setDeviceName}
+                        onSaveDevice={handleSaveDevice}
+                        onDeleteDevice={handleDeleteDevice}
+                        problem={invalid ? previewError : null}
+                        warnings={deviceWarnings}
+                      />
                     )}
 
                     {/* PRO TAB 2: TOLERANCES & CROSS-SECTION */}
@@ -1425,8 +908,8 @@ export default function App() {
                           <SliderField
                             label="Frame-to-Phone Offset"
                             value={config.clearances.frame_to_phone_offset}
-                            min={0.05}
-                            max={0.6}
+                            min={limits.frame_to_phone_offset[0]}
+                            max={limits.frame_to_phone_offset[1]}
                             step={0.01}
                             hint="Radial air gap around phone perimeter"
                             onChange={(v) =>
@@ -1439,8 +922,8 @@ export default function App() {
                           <SliderField
                             label="Backplate Snap Clearance"
                             value={config.clearances.backplate_snap_clearance}
-                            min={0.05}
-                            max={0.35}
+                            min={limits.backplate_snap_clearance[0]}
+                            max={limits.backplate_snap_clearance[1]}
                             step={0.01}
                             hint="Tolerance between plate tongue and TPU groove"
                             onChange={(v) =>
@@ -1453,8 +936,8 @@ export default function App() {
                           <SliderField
                             label="Button Pocket Clearance"
                             value={config.clearances.button_clearance}
-                            min={0.05}
-                            max={0.45}
+                            min={limits.button_clearance[0]}
+                            max={limits.button_clearance[1]}
                             step={0.01}
                             onChange={(v) =>
                               updateConfig((c) => {
@@ -1466,8 +949,8 @@ export default function App() {
                           <SliderField
                             label="Camera Ring Press Clearance"
                             value={config.clearances.camera_ring_clearance}
-                            min={0.05}
-                            max={0.35}
+                            min={limits.camera_ring_clearance[0]}
+                            max={limits.camera_ring_clearance[1]}
                             step={0.01}
                             onChange={(v) =>
                               updateConfig((c) => {
@@ -1485,8 +968,8 @@ export default function App() {
                           <SliderField
                             label="TPU Frame Wall"
                             value={config.style.frame_wall}
-                            min={1.4}
-                            max={2.4}
+                            min={limits.frame_wall[0]}
+                            max={limits.frame_wall[1]}
                             step={0.05}
                             onChange={(v) =>
                               updateConfig((c) => {
@@ -1498,8 +981,8 @@ export default function App() {
                           <SliderField
                             label="Front Screen Lip"
                             value={config.style.front_lip}
-                            min={0.6}
-                            max={2.0}
+                            min={limits.front_lip[0]}
+                            max={limits.front_lip[1]}
                             step={0.05}
                             onChange={(v) =>
                               updateConfig((c) => {
@@ -1511,8 +994,8 @@ export default function App() {
                           <SliderField
                             label="Backplate Thickness"
                             value={config.style.backplate_thickness}
-                            min={1.6}
-                            max={2.0}
+                            min={limits.backplate_thickness[0]}
+                            max={limits.backplate_thickness[1]}
                             step={0.05}
                             onChange={(v) =>
                               updateConfig((c) => {
@@ -1524,8 +1007,8 @@ export default function App() {
                           <SliderField
                             label="Retention Groove Depth"
                             value={config.style.groove_depth}
-                            min={0.6}
-                            max={1.2}
+                            min={limits.groove_depth[0]}
+                            max={limits.groove_depth[1]}
                             step={0.05}
                             onChange={(v) =>
                               updateConfig((c) => {
@@ -1537,8 +1020,8 @@ export default function App() {
                           <SliderField
                             label="Snap Lip Engagement"
                             value={config.style.snap_engage}
-                            min={0.4}
-                            max={0.85}
+                            min={limits.snap_engage[0]}
+                            max={limits.snap_engage[1]}
                             step={0.05}
                             onChange={(v) =>
                               updateConfig((c) => {
@@ -1579,7 +1062,7 @@ export default function App() {
                           { key: "frame", label: "Frame (TPU 95A / 68D)" },
                           { key: "backplate", label: "Backplate Base (PLA / PETG / Wood)" },
                           { key: "inlay", label: "Backplate Inlay (AMS Slot 2)" },
-                          { key: "camera_ring", label: "Camera Protection Ring" },
+                          ...(hasRing ? [{ key: "camera_ring", label: "Camera Protection Ring" }] : []),
                           { key: "buttons", label: "Floating Tactile Buttons" },
                         ].map(({ key, label }) => (
                           <div
@@ -1780,7 +1263,7 @@ export default function App() {
                     { key: "frame", label: "Frame" },
                     { key: "backplate", label: "Backplate" },
                     ...(hasInlay ? [{ key: "inlay", label: "Inlay" }] : []),
-                    { key: "camera_ring", label: "Camera Ring" },
+                    ...(shownRing ? [{ key: "camera_ring", label: "Camera Ring" }] : []),
                     { key: "buttons", label: "Buttons" },
                   ].map((part) => {
                     const visible = visibleGroups[part.key] !== false;
@@ -1817,7 +1300,9 @@ export default function App() {
                   </span>
                   {preview?.timings && (
                     <span className="rounded-lg border border-slate-800/80 bg-slate-950/80 px-2.5 py-1 font-mono text-[10px] text-cyan-400/90 backdrop-blur">
-                      OCCT B-Rep: frame {preview.timings.frame}s · plate {preview.timings.backplate}s · ring {preview.timings.camera_ring}s · btns {preview.timings.buttons}s
+                      OCCT B-Rep: frame {preview.timings.frame}s · plate {preview.timings.backplate}s
+                      {preview.summary?.has_camera_ring !== false && ` · ring ${preview.timings.camera_ring}s`} · btns{" "}
+                      {preview.timings.buttons}s{preview.timings.mesh !== undefined && ` · mesh ${preview.timings.mesh}s`}
                     </span>
                   )}
                 </div>

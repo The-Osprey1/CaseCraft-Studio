@@ -149,7 +149,7 @@ def test_corrupt_user_preset_is_skipped(client, data_dir):
     (data_dir / "presets" / "my_broken.json").write_text("[]", encoding="utf-8")
     data = client.get("/api/presets").json()
     assert any(s["file"] == "my_broken.json" for s in data["skipped"])
-    assert len(data["presets"]) == 10
+    assert len(data["presets"]) == len(list(PRESETS.glob("*.json")))   # every built-in still listed
 
 
 # ------------------------------------------------------------------ token + limits + errors

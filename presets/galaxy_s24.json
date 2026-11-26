@@ -1,5 +1,5 @@
 {
-  "id": "galaxy_s24", "name": "Galaxy S24 (approx - verify with calipers)",
+  "id": "galaxy_s24", "name": "Galaxy S24 (approx - verify with calipers)", "brand": "Samsung", "year": 2024,
   "body": {"length": 147.0, "width": 70.6, "thickness": 7.6, "corner_radius": 12.0},
   "camera": {"x": 6.0, "y": 6.0, "width": 18.0, "height": 46.0, "radius": 9.0},
   "buttons": [
@@ -8,7 +8,8 @@
   ],
   "ports": [
     {"id": "usbc", "side": "bottom", "center": 0.0, "width": 13.0, "height": 7.0, "radius": 3.4},
-    {"id": "speaker", "side": "bottom", "center": 20.0, "width": 14.0, "height": 3.0, "radius": 1.4}
+    {"id": "speaker", "side": "bottom", "center": 18.0, "width": 10.0, "height": 3.0, "radius": 1.4}
   ],
+  "style": {"magsafe_offset_y": -3.0},
   "verification": {"level": "approximate", "source": "Not recorded: shipped with the initial CaseCraft release as an approximation", "fit_test": "untested", "notes": "Verify every dimension with calipers and print a fit-test coupon before a full case.", "unverified_features": ["body", "camera", "buttons", "ports"]}
 }

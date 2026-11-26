@@ -1,6 +1,6 @@
 {
   "id": "pixel_9_pro",
-  "name": "Pixel 9 Pro (approx - verify with calipers)",
+  "name": "Pixel 9 Pro (approx - verify with calipers)", "brand": "Google", "year": 2024,
   "body": {"length": 152.8, "width": 72.0, "thickness": 8.50, "corner_radius": 10.5},
   "camera": {"x": 7.5, "y": 13.0, "width": 57.0, "height": 21.0, "radius": 10.0},
   "buttons": [

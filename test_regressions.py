@@ -125,6 +125,10 @@ def test_clipped_magsafe_ring_raises():
     for pid in ("oneplus_13", "galaxy_s24_ultra", "galaxy_s24"):
         p = Preset.load(pid)
         p.style.magsafe_ring = True
+        shipped = p.style.magsafe_offset_y
+        ce.generate_backplate(p)            # the preset ships with the ring shifted clear of the camera
+        assert shipped < 0
+        p.style.magsafe_offset_y = 0.0      # a centred ring hits the camera cut-out: refused, not clipped
         try:
             ce.generate_backplate(p)
         except ParamError as exc:

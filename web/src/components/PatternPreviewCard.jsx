@@ -63,7 +63,7 @@ export default function PatternPreviewCard({ request, colors, typeLabel }) {
             showIssues
             issues={data}
             dim={Boolean(error) || (loading && !current && Boolean(data))}
-            className="h-52 w-[100px]"
+            className="h-52 w-[100px] [@media(max-height:820px)]:h-32 [@media(max-height:820px)]:w-[62px]"
             label="Back of the case"
           />
           {loading && (

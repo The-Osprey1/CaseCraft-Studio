@@ -17,7 +17,19 @@
       "pattern": "^[a-z0-9_]+$"
     },
     "name": {
-      "type": "string"
+      "type": "string",
+      "maxLength": 80
+    },
+    "brand": {
+      "type": "string",
+      "maxLength": 80,
+      "description": "device maker, groups devices in the picker ('' = Other)"
+    },
+    "year": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2100,
+      "description": "release year, newest first in the picker (0 = unknown)"
     },
     "body": {
       "type": "object",
@@ -102,6 +114,11 @@
               "type": "number"
             }
           }
+        },
+        "ring": {
+          "type": "boolean",
+          "default": true,
+          "description": "true: press-fit camera ring with a raised bezel in a backplate cut-out. false: open cut-out (island + aperture margin + ring clearance) that may run through the backplate edge, for islands that reach the edge and full-width camera plateaus (x = y = 0, width = body width)"
         }
       }
     },

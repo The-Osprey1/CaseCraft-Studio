@@ -126,8 +126,9 @@ def test_preview_bed_matches_exported_3mf(tmp_path, printer):
     rep = _validate(tmp_path / "Case_Set.3mf", pr)
     for pid, obj in (("frame", "Frame_TPU"), ("backplate", "Backplate"), ("camera_ring", "CameraRing")):
         part = next(p for p in prev["parts"] if p["id"] == pid)
-        mesh = trimesh.load(io.BytesIO(base64.b64decode(part["bed_stl_b64"])), file_type="stl")
-        lo = mesh.bounds[0] + [pr.bed_x / 2, pr.bed_y / 2, 0]      # viewport centres the plate
+        v = np.frombuffer(base64.b64decode(part["mesh"]["positions"]), "<f4").reshape(-1, 3)
+        # bed pose = design mesh + bed_offset; the viewport centres the plate
+        lo = v.min(0) + part["bed_offset"] + [pr.bed_x / 2, pr.bed_y / 2, 0]
         assert np.allclose(lo, _item(rep, obj)["bbox"][0], atol=0.05), (pid, lo, _item(rep, obj)["bbox"][0])
     assert out["printer"].id == printer
 

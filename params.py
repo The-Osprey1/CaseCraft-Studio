@@ -27,6 +27,14 @@ MAX_TEXT_LEN = 64
 MAX_FONT_LEN = 64
 MIN_WALL = 1.0            # thinnest TPU side wall accepted
 OPEN_CUTOUT_MIN_STRIP = 3.0   # camera.ring = False: thinner backplate strips beside the cut-out are removed
+MAX_PORT_CHAMFER = 1.2        # style.port_chamfer (global)
+MAX_PORT_CHAMFER_OVERRIDE = 1.5   # Port.chamfer (per opening, e.g. a Camera Control finger scoop)
+PORT_FLARE_RISE = 1.04        # roof of a port flare rises slightly faster than 45 deg: margin on the overhang gate
+GRIP_RIB_RANGE = (0.2, 0.6)
+LANYARD_DEPTH_RANGE = (0.4, 0.9)
+COMPLIANT_SLIT_WIDTH = 0.6    # unibody flex slit beside a button cover (> one line width, stays open)
+COMPLIANT_SLIT_GAP = 0.2      # wall left between the button cover's end and its flex slit
+COMPLIANT_SLIT_REACH = 1.0    # slits run this far above and below the button cover
 MAX_NAME_LEN = 80
 PATTERN_TYPES = ("solid", "hex", "voronoi", "grid", "waves", "svg", "text", "dots", "triangles", "chevron")
 PATTERN_MODES = ("through", "deboss", "inlay")
@@ -65,6 +73,24 @@ def wave_min_rib(pitch: float, web: float, amplitude: float, wavelength: float, 
     spacing = pitch * stripe_cos(amplitude, wavelength, shape)
     slot = max(1.0, spacing - web)
     return spacing - slot
+
+
+def grip_rib_layout(p) -> list[float]:
+    """Z of the bottom of every grip rib: 45 deg V-ribs (rise = depth on each flank) between
+    1 mm above the backplate joint and 0.5 mm below the screen-lip ramp, centred."""
+    d = p.style.grip_rib_depth
+    z_lo, z_hi = p.bp_t + 1.0, p.H - p.lip_t - 0.5
+    pitch = 2 * d + 0.8
+    span = z_hi - z_lo
+    n = int((span + 0.8) // pitch) if span > 2 * d else 0
+    if n <= 0:
+        return []
+    start = z_lo + (span - (n * pitch - 0.8)) / 2
+    return [start + i * pitch for i in range(n)]
+
+
+def grip_rib_count(p) -> int:
+    return len(grip_rib_layout(p))
 
 
 def _finite(v) -> bool:
@@ -151,6 +177,7 @@ class Port:
     height: float = 7.0
     radius: float = 3.5
     z_offset: float = 0.0  # relative to mid-thickness of phone
+    chamfer: float | None = None   # outer 45deg flare for this opening (None = style.port_chamfer)
 
 
 @dataclass
@@ -183,6 +210,13 @@ class Style:
     magsafe_ring: bool = False
     magsafe_depth: float = 0.75
     magsafe_offset_y: float = 0.0     # ring centre shift along Y (- = towards bottom); match the phone's charging coil
+    # ergonomics / print-mode details
+    port_chamfer: float = 0.6         # outer 45deg flare around port openings (0 = straight-walled)
+    grip_ribs: bool = False           # 45deg horizontal V-ribs on the bumper's outer wall
+    grip_rib_depth: float = 0.35
+    compliant_buttons: bool = True    # unibody / co-molded: flex slits around the integrated TPU buttons
+    lanyard_pocket: bool = False      # inner-face recess for a lanyard tether tab, at the charging port
+    lanyard_depth: float = 0.65
 
 
 @dataclass
@@ -320,6 +354,22 @@ class Preset:
         c = self.camera
         return (self.W / 2 - (c.x + c.width / 2), self.L / 2 - (c.y + c.height / 2))
 
+    def port_chamfer_of(self, pt) -> float:
+        return self.style.port_chamfer if pt.chamfer is None else pt.chamfer
+
+    def port_flare(self, pt) -> tuple[float, float] | None:
+        """(c, k) of a port's outer flare, or None for a straight opening. The flare starts c mm
+        inside the outer wall face. Sideways and upwards it opens at 45 deg (the roof must rise at
+        least 45 deg to print back-down without support); downwards it opens with slope k (0..1),
+        reduced so the flare stays >= MIN_FLOOR above the backplate groove and off the bed rim."""
+        c = self.port_chamfer_of(pt)
+        if c <= 1e-6:
+            return None
+        zb0 = self.bp_t + self.T / 2 + pt.z_offset - pt.height / 2       # bottom of the straight opening
+        gz1 = self.bp_t + self.sc                                       # top of the retention groove
+        k = min(1.0, (zb0 - gz1 - MIN_FLOOR) / c, (zb0 - 0.8) / c)
+        return c, max(0.0, k)
+
     # ---- validation ---------------------------------------------------
     # Single authoritative source for parameter rules. `check()` returns (errors, warnings):
     # errors make a design unbuildable/unprintable and are raised by `validate()` (-> HTTP 422,
@@ -437,18 +487,28 @@ class Preset:
             if pt.height / 2 + abs(pt.z_offset) > b.thickness / 2 + self.o:
                 errs.append(f"port {pt.id} opening cuts into the screen lip or backplate groove "
                             "(reduce height or z_offset)")
+            if pt.chamfer is not None and not 0 <= pt.chamfer <= MAX_PORT_CHAMFER_OVERRIDE:
+                errs.append(f"port {pt.id}: chamfer must be within 0-{MAX_PORT_CHAMFER_OVERRIDE:g} mm")
+            elif (pt.z_offset + pt.height / 2 + PORT_FLARE_RISE * self.port_chamfer_of(pt)
+                  > b.thickness / 2 + self.o + s.front_lip_thickness - 1.2):
+                errs.append(f"port {pt.id}: its outer chamfer runs into the rounded screen-lip rim "
+                            "(reduce the chamfer or the opening height)")
             # along-edge coordinate measured like button pos (from the top / front-view left)
             along = (half - pt.center) if pt.side in ("left", "right") else (half + pt.center)
-            port_spans[pt.side].append((along - pt.width / 2, along + pt.width / 2, f"port {pt.id}"))
+            ch = self.port_chamfer_of(pt) if _finite(self.port_chamfer_of(pt)) else 0.0
+            port_spans[pt.side].append((along - pt.width / 2, along + pt.width / 2, f"port {pt.id}", ch))
         for sd in SIDES:
             ports = sorted(port_spans[sd])
-            for (a0, a1, an), (b0, b1, bn) in zip(ports, ports[1:]):
+            for (a0, a1, an, _), (b0, b1, bn, _) in zip(ports, ports[1:]):
                 if b0 < a1:
                     warns.append(f"{an} and {bn} overlap and will merge into one opening")
-            for p0, p1, pn in ports:
+            for p0, p1, pn, ch in ports:
                 for b0, b1, bn in spans[sd]:
                     if p0 < b1 and b0 < p1:
                         errs.append(f"{pn} overlaps the {bn} pocket on the {sd} side")
+                    elif p0 - ch < b1 and b0 < p1 + ch:
+                        errs.append(f"the outer chamfer of {pn} runs into the {bn} pocket on the {sd} side "
+                                    "(reduce the chamfer or move the opening)")
         # -- camera
         cam = self.camera
         if cam.width <= 0 or cam.height <= 0 or cam.radius < 0:
@@ -475,9 +535,24 @@ class Preset:
                 errs.append("camera island covers more than half of the phone back; the backplate would be too small")
             if cam.opening is not None:
                 warns.append("camera.opening only shapes the camera ring; it is ignored with an open camera cut-out")
-        # -- MagSafe, pattern
+        # -- MagSafe, lanyard, ergonomics, pattern
         if s.magsafe_ring and (s.backplate_thickness - s.magsafe_depth < 0.7 or s.magsafe_depth <= 0):
             errs.append("magsafe_depth must leave >= 0.7 mm backplate floor")
+        lo, hi = LANYARD_DEPTH_RANGE
+        if not lo <= s.lanyard_depth <= hi:
+            errs.append(f"style.lanyard_depth must be within {lo:g}-{hi:g} mm")
+        elif s.lanyard_pocket and s.backplate_thickness - s.lanyard_depth < MIN_FLOOR:
+            errs.append(f"lanyard_depth must leave >= {MIN_FLOOR} mm backplate floor")
+        if not 0 <= s.port_chamfer <= MAX_PORT_CHAMFER:
+            errs.append(f"style.port_chamfer must be within 0-{MAX_PORT_CHAMFER:g} mm")
+        lo, hi = GRIP_RIB_RANGE
+        if not lo <= s.grip_rib_depth <= hi:
+            errs.append(f"style.grip_rib_depth must be within {lo:g}-{hi:g} mm")
+        elif s.grip_ribs and s.frame_wall - s.grip_rib_depth < MIN_FLOOR:
+            errs.append(f"style.grip_rib_depth leaves < {MIN_FLOOR} mm of TPU wall behind the grip grooves "
+                        "(reduce the depth or thicken the wall)")
+        elif s.grip_ribs and grip_rib_count(self) == 0:
+            warns.append("style.grip_ribs: the side wall is too short for a grip rib at this depth; none are added")
         if self.pattern.type not in PATTERN_TYPES:
             errs.append("pattern.type must be " + "|".join(PATTERN_TYPES))
         if self.pattern.mode not in PATTERN_MODES:
@@ -574,6 +649,9 @@ class Preset:
                 elif f.type in ("str", str):
                     if not isinstance(v, str):
                         errs.append(f"{gname}.{f.name} must be a string")
+                elif f.type == "float | None":
+                    if v is not None and not _finite(v):
+                        errs.append(f"{gname}.{f.name} must be a finite number or null")
         return errs
 
     def _pattern_errors(self) -> list[str]:

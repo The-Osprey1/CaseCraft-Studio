@@ -5,6 +5,7 @@ import DeviceEditor from "./components/DeviceEditor.jsx";
 import DevicePicker, { deviceBrand } from "./components/DevicePicker.jsx";
 import PatternControls from "./components/PatternControls.jsx";
 import PatternPreviewCard from "./components/PatternPreviewCard.jsx";
+import ErgonomicsControls from "./components/ErgonomicsControls.jsx";
 import ViewportToolbar from "./components/ViewportToolbar.jsx";
 import usePatternSpecs from "./hooks/usePatternSpecs.js";
 import usePatternRequest from "./hooks/usePatternRequest.js";
@@ -1031,6 +1032,8 @@ export default function App() {
                             }
                           />
                         </section>
+
+                        <ErgonomicsControls config={config} limits={limits} updateConfig={updateConfig} />
                       </div>
                     )}
 

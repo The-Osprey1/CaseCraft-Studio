@@ -262,6 +262,57 @@ The browser check (built app on uvicorn, in-app browser) confirmed:
 - **Tolerances:** sliders show the accepted ranges (wall 1.55–2.4 mm, groove 0.65–0.95 mm, lip 0.6–1.5 mm).
 - **Errors:** no console errors besides the deliberate 422 above; no server errors.
 
+### Milestone H: grip and openings (port chamfers, grip grooves, flexible unibody buttons, lanyard pocket)
+All four features are built in the CAD engine, validated in `Preset.check()`, documented in the schema and exposed in the UI. Each prints back-down (frame, unibody) or outer face down (backplate) without support, and is checked by the existing overhang gate (`dfm.classify`).
+
+- **Port chamfer / finger scoop** (`style.port_chamfer`, default 0.6 mm, 0–1.2 mm; `ports[].chamfer` overrides it per opening up to 1.5 mm, or `null` for the default):
+  - `Preset.port_flare()` gives the flare: it starts `c` mm inside the outer face, opens sideways at 45°, upwards at 1.04 mm per mm (a little steeper than 45°, so the roof is never an overhang) and downwards only as far as keeps ≥ 0.6 mm of wall above the backplate groove and clear of the bed rim. On the shipped presets the small speaker and microphone openings flare fully downwards; most USB-C openings sit close to the groove and get a flat bottom (no downward flare), the 17 Pro Max's a partial one.
+  - The cutter is a ruled loft between two rounded rectangles (`_port_local`), used by the frame, the unibody and the ports coupon.
+  - New rules: the flare may not climb into the rounded screen-lip rim, and it may not run into a button pocket on the same side.
+  - **Behaviour change:** the 0.6 mm default flares every port on existing designs and presets. Set `port_chamfer` to 0 for the old straight openings.
+- **Grip grooves** (`style.grip_ribs`, off by default; `grip_rib_depth` 0.2–0.6 mm):
+  - Horizontal V-grooves laid out by `grip_rib_layout()` between 1 mm above the backplate joint and 0.5 mm below the screen-lip ramp. The lower flank faces up; the upper flank rises 1.04 mm per mm, so neither needs support.
+  - Cut only on the straight part of the left and right walls (`grip_rib_spans`), stopping 1 mm before the corners and keeping 1 mm of whole wall around every button pocket, unibody button cover and flex slit, and port flare. Pieces shorter than 3 mm are left out.
+  - New rule: the groove must leave ≥ 0.6 mm of wall behind it. If the wall is too short for any groove, a warning says none are added.
+- **Flexible unibody buttons** (`style.compliant_buttons`, on by default; unibody only):
+  - Two 0.6 mm through-wall slits flank each button cover, reaching 1 mm above and below it and staying ≥ 0.6 mm clear of the floor and the screen-lip ramp. The wall strip between them stays joined top and bottom and bends like a short beam. Each slit ends in a pointed roof, so it prints without support.
+  - Reported in `unibody_adaptations()` either way (slits, or "closed wall, firmer press").
+  - How much easier the press actually is has not been measured; it needs a physical print.
+- **Lanyard tether pocket** (`style.lanyard_pocket`, off by default; `lanyard_depth` 0.4–0.9 mm):
+  - `patterns.lanyard_pocket_poly()` (from the groundwork) is cut into the backplate's inner face, with the neck ending at the plate body edge, and into the unibody floor, with the neck ending at the cavity wall, so the strap lies flush until it leaves through the charging port.
+  - It is a pattern keep-out (`pattern_region`), raises a clear error when it would hit the MagSafe ring or the camera cut-out, and is drawn as a dashed outline in the 2D previews. The 2D preview also reports the MagSafe clash for a solid plate.
+  - A preview finding explains it, including that the flat laser-cut backplate drawing cannot contain a recess.
+- **Preview speed and caching:** `part_key` now leaves `lanyard_*` and `compliant_buttons` out of the frame key, and all Milestone H keys (plus `magsafe_*`) out of the camera ring and buttons keys. Toggling the lanyard pocket or the flexible buttons reuses the cached frame; port chamfer and grip changes rebuild only the frame.
+- **Schema:** `style` is now fully documented: all 26 keys with type, default and hard bounds, and `additionalProperties: false` (the parameter loader already rejected unknown keys). A test keeps it in step with `params.Style`.
+- **UI:**
+  - Pro › Tolerances has a new *Grip & Openings* section (`ErgonomicsControls.jsx`): port chamfer slider, grip grooves toggle and depth, flexible unibody buttons toggle.
+  - The pattern panel (wizard and Pro) has a *Lanyard tether pocket* toggle, with the depth slider in Pro mode; the pocket shows as a dashed amber outline on the live back view.
+  - Device editor: each port has an *Outer chamfer* field that starts on "Case default" and can be given its own value or reset.
+  - `fitLimits.js` bounds the new sliders (rim room for the chamfer, wall for the grooves, plate floor for the pocket) and tightens the wall and backplate sliders when grooves or the pocket are on.
+
+**Milestone H results** (2026-11-27, Windows 11, Python 3.12):
+
+| Command | Result |
+|---|---|
+| `python -m pytest` | **265 passed**, 0 failed, 0 skipped (3 m 21 s); 45 of them new in `test_ergonomics.py` |
+| Every shipped preset with grip grooves and the lanyard pocket on | all 14 validate; frame, backplate and unibody build as one valid solid each, with 0 broad overhangs |
+| New slider ranges (`fitLimits.js`) | all 84 endpoints (14 presets × 3 sliders × min/max, features on) pass `Preset.check()` |
+| `cli_test.py --preset iphone_16_pro --pattern voronoi --mode through --magsafe` | **56/56** |
+| `cli_test.py --preset iphone_17_pro --pattern hex --mode through` | **49/49** |
+| `cli_test.py --preset iphone_16_pro --pattern hex --mode through --grip-ribs --lanyard` | **56/56**; backplate 0.81 s |
+| `cli_test.py --preset iphone_17_pro_max --pattern text --mode inlay --printer bambu_h3c --grip-ribs --lanyard` | **64/64** |
+| `cli_test.py --preset galaxy_s24_ultra --pattern dots --mode deboss --grip-ribs --lanyard --port-chamfer 1.2` | **50/50** on the rerun (backplate 1.36 s). The first run failed the 1.5 s timing check at 1.73 s while the machine was otherwise busy; the same design without the new features takes 1.44 s, so this design sits close to the budget regardless of Milestone H. |
+| `cli_test.py --preset iphone_air --pattern solid --mode through --magsafe --grip-ribs --lanyard` | **48/48** (MagSafe ring and lanyard pocket together) |
+| `cli_test.py --coupon`: camera (default), `iphone_16_pro` buttons, `iphone_17` ports | **27/27**, **52/52**, **17/17** |
+| `cd web && npm run build` | builds; entry chunk 264 kB, lazy 3D chunk 898 kB |
+| `desktop\build.ps1` | frontend build, 195 fast tests passed, PyInstaller, packaged-app smoke test all ok (14 presets, previews, export ZIP, laser SVG), `dist\CaseCraftStudio-Setup-1.1.0.exe` (133 MB). Version left at 1.1.0. |
+
+`cli_test.py` gained `--grip-ribs`, `--lanyard` and `--port-chamfer` so the gates can exercise the new features.
+
+The browser check (built app on uvicorn, in-app browser, iPhone 15 Pro) confirmed: the *Grip & Openings* controls appear under Tolerances and turning grip grooves on rebuilds the frame with visible grooves on the side walls; with the lanyard pocket on, a hex pattern stays off the bottom of the plate and the live back view draws the pocket as a dashed outline; each port in the Device tab shows "Case default (0.6 mm) · set own"; no console errors.
+
+**Not verified:** no physical print or slicer import of any Milestone H feature. How much the flex slits soften a button press, how the grip grooves feel, and whether a real lanyard card fits the pocket are all untested.
+
 ## B. File-level change summary
 
 **Modified:**
@@ -298,6 +349,14 @@ The browser check (built app on uvicorn, in-app browser) confirmed:
   - presets: all 10 existing (brand and year; MagSafe offsets on Galaxy S24, S24 Ultra and OnePlus 13; Galaxy S24 speaker), `schema/phone_preset.schema.json`
   - frontend: `web/src/{App.jsx,api.js}`, `web/src/components/{Fields,Viewport3D,PlatePreview,PatternPreviewCard}.jsx`
   - tests: `test_api.py`, `test_validation.py`, `test_geometry.py`, `test_desktop.py`, `test_regressions.py`, `test_printer_export.py`
+  - docs: `README.md`, this report
+
+**Milestone H:**
+- Created: `test_ergonomics.py`, `web/src/components/ErgonomicsControls.jsx`
+- Modified:
+  - engine: `params.py` (new `Style` and `Port.chamfer` fields, flare and groove layout, rules), `patterns.py` (lanyard pocket, keep-out, preview), `cad_engine.py` (port flare loft, grip grooves, flex slits, lanyard pocket, `part_key`), `server.py` (lanyard finding), `cli_test.py` (new flags)
+  - `schema/phone_preset.schema.json` (full `style` block, `ports[].chamfer`)
+  - frontend: `web/src/App.jsx`, `web/src/fitLimits.js`, `web/src/components/{PatternControls,PlatePreview,DeviceEditor}.jsx`
   - docs: `README.md`, this report
 
 ## C. Testing results
@@ -386,7 +445,8 @@ See [MANUFACTURING_VERIFICATION.md](MANUFACTURING_VERIFICATION.md#manual-checkli
 5. **Trim the Three.js chunk.** Milestone F lazy-loads the viewer (entry ~245 kB), but the 3D chunk is still ~900 kB; importing only the used drei helpers would shrink it.
 6. **Physical prints of the new patterns,** especially `fade` and `corner_radius`, to confirm that the 2 mm² smallest faded cell and the rounded corners hold up on a real FDM print.
 7. **Fit-test the iPhone 17 family** (camera and buttons coupons), then decide whether a clip-on plateau guard is worth adding for lens protection.
-8. **Newer Android presets** (Galaxy S25 series, Pixel 10 series) from the makers' dimensional data where it is published.
+8. **Print the Milestone H features:** a ports coupon at 0, 0.6 and 1.2 mm chamfer with a real cable, a unibody with and without flex slits to compare the button press, and a backplate with the lanyard pocket against a real tether card.
+9. **Newer Android presets** (Galaxy S25 series, Pixel 10 series) from the makers' dimensional data where it is published.
 
 ## External references consulted
 

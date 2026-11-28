@@ -3,6 +3,7 @@ Usage: python cli_test.py [--preset iphone_15_pro]
                           [--pattern solid|hex|dots|triangles|grid|voronoi|waves|chevron|svg|text]
                           [--mode through|deboss|inlay] [--edge clip|whole|fade] [--corner-radius MM]
                           [--magsafe] [--printer generic_256|bambu_h3c]
+                          [--grip-ribs] [--lanyard] [--port-chamfer MM]
                           [--coupon [--coupon-type camera|buttons|ports]] [--out out]
 Exit codes: 0 all checks passed, 1 a check failed, 2 the design itself is invalid (same message as HTTP 422).
 """
@@ -51,7 +52,7 @@ def check_3mf(path, printer, res):
 
 
 def run(preset_id, pattern, mode, out, magsafe=False, printer=None, perf_budget=1.5, edge=None,
-        corner_radius=None):
+        corner_radius=None, grip_ribs=False, lanyard=False, port_chamfer=None):
     p = Preset.load(preset_id)
     p.pattern.type, p.pattern.mode = pattern, mode
     if edge is not None:
@@ -59,6 +60,9 @@ def run(preset_id, pattern, mode, out, magsafe=False, printer=None, perf_budget=
     if corner_radius is not None:
         p.pattern.corner_radius = corner_radius
     p.style.magsafe_ring = magsafe
+    p.style.grip_ribs, p.style.lanyard_pocket = grip_ribs, lanyard
+    if port_chamfer is not None:
+        p.style.port_chamfer = port_chamfer
     if pattern == "svg":
         p.pattern.params = {"svg": STAR_SVG, "size": 0.5}
     elif pattern == "text":
@@ -236,6 +240,9 @@ if __name__ == "__main__":
     ap.add_argument("--coupon", action="store_true")
     ap.add_argument("--magsafe", action="store_true")
     ap.add_argument("--printer", default=None, help="printer profile id (default generic_256)")
+    ap.add_argument("--grip-ribs", action="store_true", help="cut grip grooves into the side walls")
+    ap.add_argument("--lanyard", action="store_true", help="add the lanyard tether-tab pocket")
+    ap.add_argument("--port-chamfer", type=float, default=None, help="outer port chamfer in mm (default: preset)")
     ap.add_argument("--coupon-type", default=None, choices=["camera", "buttons", "ports"],
                     help="fit-test coupon to build with --coupon (default camera)")
     ap.add_argument("--perf-budget", type=float, default=1.5,
@@ -247,7 +254,8 @@ if __name__ == "__main__":
             results = run_coupon(a.preset, a.out, a.coupon_type, a.printer)
         else:
             results, timings = run(a.preset, a.pattern, a.mode, a.out, magsafe=a.magsafe, printer=a.printer,
-                                   perf_budget=a.perf_budget, edge=a.edge, corner_radius=a.corner_radius)
+                                   perf_budget=a.perf_budget, edge=a.edge, corner_radius=a.corner_radius,
+                                   grip_ribs=a.grip_ribs, lanyard=a.lanyard, port_chamfer=a.port_chamfer)
             results += stress()
     except ParamError as exc:            # same message the API returns as HTTP 422
         print(f"INVALID DESIGN: {exc}")

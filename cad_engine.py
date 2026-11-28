@@ -42,7 +42,14 @@ SIDE_ANGLE = {"right": 0, "top": 90, "left": 180, "bottom": 270}
 _PART_CACHE: OrderedDict = OrderedDict()
 _PART_CACHE_MAX = 32
 _part_lock = threading.Lock()
-_NOT_FRAME = ("camera_", "magsafe_")
+# style keys a part never reads (str.startswith prefixes). The frame does read port_chamfer and
+# grip_*; the lanyard pocket is in the backplate and compliant_buttons only shapes the unibody.
+_NOT_FRAME = ("camera_", "magsafe_", "lanyard_", "compliant_buttons")
+_NOT_RING_OR_BUTTONS = ("magsafe_", "lanyard_", "compliant_buttons", "port_chamfer", "grip_")
+
+
+def _style_without(style: dict, prefixes: tuple) -> dict:
+    return {k: v for k, v in style.items() if not k.startswith(prefixes)}
 
 
 def part_key(p: Preset, part: str) -> str:
@@ -51,12 +58,11 @@ def part_key(p: Preset, part: str) -> str:
     d = dataclasses.asdict(p)
     style = d["style"]
     if part == "frame":
-        deps = [d["body"], d["clearances"], {k: v for k, v in style.items() if not k.startswith(_NOT_FRAME)},
-                d["buttons"], d["ports"]]
+        deps = [d["body"], d["clearances"], _style_without(style, _NOT_FRAME), d["buttons"], d["ports"]]
     elif part == "ring":
-        deps = [d["body"], d["camera"], style, d["clearances"]]
+        deps = [d["body"], d["camera"], _style_without(style, _NOT_RING_OR_BUTTONS), d["clearances"]]
     elif part == "buttons":
-        deps = [d["body"], d["buttons"], style, d["clearances"]]
+        deps = [d["body"], d["buttons"], _style_without(style, _NOT_RING_OR_BUTTONS), d["clearances"]]
     elif part == "phone":
         deps = [d["body"], style["backplate_thickness"]]
     else:
@@ -211,19 +217,110 @@ def _cavity_and_lip_cuts(p: Preset, cavity_z0: float) -> list[Solid]:
     ]
 
 
+def _wall_profile(w: float, h: float, r: float, x: float, dz: float = 0.0) -> Face:
+    """Rounded-rectangle face in the wall plane at local X = x (sketch x -> along, y -> up)."""
+    r = safe_corner_radius(r, w, h)
+    loc = Location(Plane(origin=(x, 0, dz), x_dir=(0, 1, 0), z_dir=(1, 0, 0)))
+    return loc * RectangleRounded(w, h, max(r, 1e-3)).face()
+
+
+FLARE_OVERRUN = 1.0   # the flare tool runs this far past the outer wall face, at the same slopes
+
+
+def _port_local(p: Preset, pt) -> list[Solid]:
+    """Cutters of one port opening in local coords (+X outward, X=0 on the cavity wall): the
+    straight opening and, with a chamfer, its outer flare (Preset.port_flare): it starts c mm
+    inside the outer face and opens sideways at 45 deg, upwards at PORT_FLARE_RISE (steeper than
+    45 deg, so the roof prints back-down without support) and downwards with slope k."""
+    from params import PORT_FLARE_RISE
+    straight = Pos(-1.0, 0, 0) * Solid.extrude(_wall_profile(pt.width, pt.height, pt.radius, 0.0), Vector(8, 0, 0))
+    flare = p.port_flare(pt)
+    if flare is None:
+        return [straight]
+    c, k = flare
+    x0 = p.style.frame_wall - c
+    g = c + FLARE_OVERRUN                                     # growth from x0 to the tool's outer end
+    top, bot = pt.height / 2 + PORT_FLARE_RISE * g, -pt.height / 2 - k * g
+    inner = _wall_profile(pt.width, pt.height, pt.radius, x0)
+    outer = _wall_profile(pt.width + 2 * g, top - bot, pt.radius + g, x0 + g, (top + bot) / 2)
+    loft = Solid.make_loft([inner.outer_wire(), outer.outer_wire()], ruled=True)
+    if not _is_valid(loft):
+        raise ParamError(f"port {pt.id}: its outer chamfer could not be built; reduce the chamfer")
+    return [straight, loft]
+
+
 def _port_cutters(p: Preset) -> list[Solid]:
     zc = p.bp_t + p.T / 2
     cuts = []
     for pt in p.ports:
-        rad = safe_corner_radius(pt.radius, pt.width, pt.height)
-        prof = RectangleRounded(pt.width, pt.height, max(rad, 1e-3)).face()
-        cutter = Solid.extrude(prof, Vector(0, 0, 8))          # along +Z, local sketch XY
-        # re-orient: sketch plane XY -> (along, vertical), extrusion -> outward (+X local)
-        loc = Location(Plane(origin=(0, 0, 0), x_dir=(0, 1, 0), z_dir=(1, 0, 0)))
-        cutter = loc * cutter                                  # extrusion now +X, sketch x->Y, y->Z
-        cutter = Pos(-1.0, 0, 0) * cutter                      # begin slightly inside cavity
-        cuts.append(place_on_edge(cutter, p, pt.side, pt.center, zc + pt.z_offset))
+        cuts += [place_on_edge(t, p, pt.side, pt.center, zc + pt.z_offset) for t in _port_local(p, pt)]
     return cuts
+
+
+# ----------------------------------------------------------------------------- grip ribs
+GRIP_EDGE_MARGIN = 1.0      # grooves stop this far before the rounded corners
+GRIP_KEEP_CLEAR = 1.0       # extra wall kept whole around button pockets / covers and port flares
+GRIP_MIN_RUN = 3.0          # shorter groove pieces are left out
+
+
+def grip_rib_spans(p: Preset, side: str) -> list[tuple[float, float]]:
+    """World-Y intervals of the straight part of the `side` wall (left/right) that carry grip
+    grooves: the straight run between the corner arcs, minus every button pocket (modular) or
+    button cover + flex slits (unibody) and every port flare on that side, plus GRIP_KEEP_CLEAR."""
+    from params import COMPLIANT_SLIT_GAP, COMPLIANT_SLIT_WIDTH
+    half = p.L / 2 - p.body.corner_radius - GRIP_EDGE_MARGIN
+    if half <= 0:
+        return []
+    s, c = p.style, p.clearances
+    blocked = []
+    for b in p.buttons:
+        if b.side == side:
+            grow = max(s.button_flange_overhang + c.button_clearance, 0.2 + COMPLIANT_SLIT_GAP + COMPLIANT_SLIT_WIDTH)
+            a = button_along(p, b)
+            blocked.append((a - b.length / 2 - grow - GRIP_KEEP_CLEAR, a + b.length / 2 + grow + GRIP_KEEP_CLEAR))
+    for pt in p.ports:
+        if pt.side == side:
+            grow = p.port_chamfer_of(pt) + FLARE_OVERRUN
+            blocked.append((pt.center - pt.width / 2 - grow - GRIP_KEEP_CLEAR,
+                            pt.center + pt.width / 2 + grow + GRIP_KEEP_CLEAR))
+    spans, lo = [], -half
+    for b0, b1 in sorted(blocked):
+        if b0 > lo:
+            spans.append((lo, min(b0, half)))
+        lo = max(lo, b1)
+        if lo >= half:
+            break
+    if lo < half:
+        spans.append((lo, half))
+    return [(a0, a1) for a0, a1 in spans if a1 - a0 >= GRIP_MIN_RUN]
+
+
+def _grip_rib_cutters(p: Preset):
+    """Horizontal V-grooves cut into the straight long side walls (style.grip_ribs), one tool
+    per groove piece, or None. Profile seen along the wall: the apex is grip_rib_depth inside the
+    outer face; the lower flank (facing up) rises 2 - PORT_FLARE_RISE times the depth, the upper
+    flank (the overhang) PORT_FLARE_RISE times it, so it prints back-down without support. The
+    flanks run on past the outer face so the cut is clean."""
+    from params import PORT_FLARE_RISE, grip_rib_layout
+    if not p.style.grip_ribs:
+        return None
+    d, e = p.style.grip_rib_depth, 0.5
+    lo_rise, hi_rise = (2 - PORT_FLARE_RISE) * d, PORT_FLARE_RISE * d
+    xo = p.W / 2 + p.outer_offset
+    tools = []
+    for side, sx in (("right", 1), ("left", -1)):
+        for a0, a1 in grip_rib_spans(p, side):
+            for z0 in grip_rib_layout(p):
+                # (outward distance from the outer face, z) -> world (x, y, z)
+                prof = [(-d, z0 + lo_rise), (e, z0 - e * lo_rise / d), (e, z0 + 2 * d + e * hi_rise / d)]
+                wire = Wire.make_polygon([Vector(sx * (xo + n), a0, z) for n, z in prof], close=True)
+                tools.append(Solid.extrude(Face(wire), Vector(0, a1 - a0, 0)))
+    return Compound(tools) if tools else None
+
+
+def _cut_grip_ribs(shape, p: Preset):
+    tools = _grip_rib_cutters(p)
+    return shape if tools is None else shape.cut(tools)
 
 
 def generate_frame(p: Preset) -> Solid:
@@ -262,7 +359,7 @@ def _build_frame(p: Preset) -> Solid:
     frame = outer
     for cutter in cuts:
         frame = frame.cut(cutter)
-    frame = frame.clean()
+    frame = _cut_grip_ribs(frame, p).clean()
     if not _is_valid(frame):
         raise RuntimeError("frame solid invalid")
     return frame
@@ -314,6 +411,8 @@ def generate_backplate(p: Preset, with_pattern: bool = True):
     if s.magsafe_ring:
         z0 = p.bp_t - s.magsafe_depth
         plate = plate.cut(_magsafe_tool(p, z0, s.magsafe_depth + 0.5)).clean()
+    if s.lanyard_pocket:                     # tether-tab recess on the inner (phone) face
+        plate = plate.cut(_lanyard_tool(p, p.plate_body_offset)).clean()
     if not _is_valid(plate):
         raise RuntimeError("backplate invalid")
     if with_pattern:
@@ -375,6 +474,16 @@ def _magsafe_tool(p: Preset, z0: float, h: float):
     x0, y0, x1, y1 = MAGSAFE_TAIL
     tail = Pos((x0 + x1) / 2, (y0 + y1) / 2, h / 2) * Box(x1 - x0, y1 - y0, h)
     return Pos(0, oy, z0) * Compound([ring, tail])
+
+
+def _lanyard_tool(p: Preset, edge_offset: float):
+    """Cutter for the lanyard tether-tab pocket: patterns.lanyard_pocket_poly (validated against
+    the MagSafe ring, the camera cut-out and the plate edge) from lanyard_depth below the inner
+    face up past it. The pocket opens towards the phone, so it is a plain floor recess in both
+    print orientations (plate outer face down, unibody back-down)."""
+    from patterns import lanyard_pocket_poly
+    d = p.style.lanyard_depth
+    return _prisms(lanyard_pocket_poly(p, edge_offset), p.bp_t - d, d + 1.0)
 
 
 def _prisms(geom, z0: float, h: float):
@@ -662,6 +771,12 @@ def unibody_adaptations(p: Preset) -> list[str]:
     if p.buttons:
         notes.append("Unibody: floating buttons are replaced by raised TPU button covers with an inner "
                      "press nub (single material cannot hold a captured moving part).")
+        if p.style.compliant_buttons:
+            notes.append("Unibody: two flex slits through the wall beside each button cover let it press in "
+                         "with less force (style.compliant_buttons; turn it off for a closed wall).")
+        else:
+            notes.append("Unibody: the button covers sit on a closed wall (style.compliant_buttons is off), "
+                         "so they need a firmer press.")
     if p.camera.ring:
         notes.append("Unibody: the camera surround is flush with the back (a raised bezel would lift the "
                      "case off the bed when printing back-down); use the modular camera ring for a raised guard.")
@@ -691,6 +806,37 @@ def _button_cover_local(p: Preset, b) -> Solid:
     return pad.clean()
 
 
+def compliant_slit_z(p: Preset) -> tuple[float, float]:
+    """(z_lo, z_hi) of the unibody flex slits: COMPLIANT_SLIT_REACH beyond the button cover,
+    kept >= MIN_FLOOR above the floor and below the screen-lip ramp so they only open the wall."""
+    from params import COMPLIANT_SLIT_REACH, MIN_FLOOR
+    half = p.style.button_height / 2 + 0.2 + COMPLIANT_SLIT_REACH
+    zc = button_zc(p)
+    return max(zc - half, p.bp_t + MIN_FLOOR), min(zc + half, p.H - p.lip_t - MIN_FLOOR)
+
+
+def _compliant_slits_local(p: Preset, b) -> list[Solid]:
+    """Two vertical through-wall slits flanking a unibody button cover (local coords, +X outward,
+    Z relative to button_zc). The wall strip between them carries the cover and bends inwards
+    like a short beam fixed top and bottom, so the button presses with less force than a solid
+    wall. Nothing is cut loose (the strip stays joined above and below), and each slit ends in a
+    pointed 45+ deg roof so it prints back-down without support."""
+    from params import COMPLIANT_SLIT_GAP, COMPLIANT_SLIT_WIDTH, PORT_FLARE_RISE
+    s = COMPLIANT_SLIT_WIDTH
+    z_lo, z_hi = (z - button_zc(p) for z in compliant_slit_z(p))
+    if z_hi - z_lo < 2 * s:
+        return []
+    x0, x1 = -0.5, p.style.frame_wall + p.style.button_cap_height + 0.5
+    tip = PORT_FLARE_RISE * s / 2
+    out = []
+    for sign in (-1, 1):
+        yc = sign * (b.length / 2 + 0.2 + COMPLIANT_SLIT_GAP + s / 2)
+        prof = [(yc - s / 2, z_lo), (yc + s / 2, z_lo), (yc + s / 2, z_hi - tip), (yc, z_hi), (yc - s / 2, z_hi - tip)]
+        wire = Wire.make_polygon([Vector(x0, y, z) for y, z in prof], close=True)
+        out.append(Solid.extrude(Face(wire), Vector(x1 - x0, 0, 0)))
+    return out
+
+
 def generate_unibody(p: Preset) -> Solid:
     """Single-piece unibody print (single-material TPU or other flexible filament), design pose,
     rear face at Z=0 (= print orientation, back-down).
@@ -714,10 +860,16 @@ def generate_unibody(p: Preset) -> Solid:
     body = _frame_outer(q)
     for cutter in cuts:
         body = body.cut(cutter)
+    body = _cut_grip_ribs(body, q)
     for b in q.buttons:
         body = body.fuse(place_on_edge(_button_cover_local(q, b), q, b.side, button_along(q, b), button_zc(q)))
+    if q.style.compliant_buttons and q.buttons:
+        body = body.cut(Compound([place_on_edge(t, q, b.side, button_along(q, b), button_zc(q))
+                                  for b in q.buttons for t in _compliant_slits_local(q, b)]))
     if q.style.magsafe_ring:                 # magnets drop into the floor from the phone side
         body = body.cut(_magsafe_tool(q, q.bp_t - q.style.magsafe_depth, q.style.magsafe_depth + 0.5))
+    if q.style.lanyard_pocket:               # the neck runs to the cavity wall under the charging port
+        body = body.cut(_lanyard_tool(q, q.cavity_offset))
     body = body.clean()
     body, _ = apply_backplate_pattern(body, q)
     if not _is_valid(body):

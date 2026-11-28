@@ -109,6 +109,12 @@ def design_findings(p: Preset, pr: PrinterProfile) -> list[dict]:
                             "Open camera cut-out: the backplate clears the camera island (it may run through the "
                             "backplate edge) and there is no press-fit camera ring, so nothing on the case stands "
                             "proud of the lenses. Check the cut-out with the camera fit-test coupon."))
+    if p.style.lanyard_pocket:
+        out.append(_finding("info", "lanyard",
+                            f"Lanyard tether pocket: a {p.style.lanyard_depth:g} mm recess on the inside of the "
+                            "backplate (and the unibody floor) leading to the charging port, where the strap leaves "
+                            "the case. It is not in the flat laser-cut backplate drawing (a laser cuts through, not "
+                            "a recess). Check it with your tether card before printing a full case."))
     if pr.toolchanger:
         out += [_finding("warning" if i else "info", "print_in_place", m)
                 for i, m in enumerate(print_in_place.quick_findings(p))]

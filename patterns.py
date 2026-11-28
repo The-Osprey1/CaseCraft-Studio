@@ -153,6 +153,50 @@ def magsafe_pocket_poly(p: Preset):
     return pocket
 
 
+LANYARD_W, LANYARD_H, LANYARD_NECK = 46.0, 13.0, 8.5   # tether-tab pocket and the strap's neck (mm)
+LANYARD_EDGE_GAP = 3.0                                  # pocket starts this far above the plate edge
+
+
+def lanyard_anchor_x(p: Preset) -> float:
+    """Design X of the opening the strap leaves through: the bottom `usbc` port, else the widest
+    bottom opening, else the middle."""
+    bottom = [pt for pt in p.ports if pt.side == "bottom"]
+    usb = next((pt for pt in bottom if pt.id == "usbc"), None) or (max(bottom, key=lambda q: q.width) if bottom else None)
+    return float(usb.center) if usb else 0.0
+
+
+def lanyard_pocket_raw(p: Preset, edge_offset: float | None = None):
+    """Tether-tab pocket on the plate's INNER face (unvalidated; for drawing): a rounded pad
+    LANYARD_EDGE_GAP above the bottom edge plus a neck running to the edge under the charging
+    port, so the strap lies flush until it leaves through the port. `edge_offset` = outline
+    offset the neck stops at (plate body for the modular plate, the cavity wall for the unibody)."""
+    edge = p.plate_body_offset if edge_offset is None else edge_offset
+    y_edge = -(p.L / 2 + edge)
+    w = min(LANYARD_W, p.W - 2 * p.body.corner_radius - 2.0)
+    half_room = p.W / 2 - p.body.corner_radius - 1.0 - w / 2
+    cx = max(-half_room, min(half_room, lanyard_anchor_x(p))) if half_room > 0 else 0.0
+    y0 = y_edge + LANYARD_EDGE_GAP
+    pad = rrect_poly(w, LANYARD_H, 3.0, cx, y0 + LANYARD_H / 2)
+    nx = max(-p.W / 2 + LANYARD_NECK, min(p.W / 2 - LANYARD_NECK, lanyard_anchor_x(p)))
+    neck = sbox(nx - LANYARD_NECK / 2, y_edge, nx + LANYARD_NECK / 2, y0 + 1.0)
+    return unary_union([pad, neck])
+
+
+def lanyard_pocket_poly(p: Preset, edge_offset: float | None = None):
+    """Validated tether-tab pocket: raises (like the MagSafe pocket) instead of trimming it when
+    the pad would hit the MagSafe ring, the camera cut-out, or run off the plate."""
+    pocket = lanyard_pocket_raw(p, edge_offset)
+    pad = pocket.difference(sbox(-1e3, -1e3, 1e3, -(p.L / 2 + p.plate_body_offset) + LANYARD_EDGE_GAP))
+    if p.style.magsafe_ring and pocket.intersects(magsafe_ring_poly(p).buffer(1.0)):
+        raise ParamError("The lanyard tether pocket overlaps the MagSafe ring; move the ring up with "
+                         "style.magsafe_offset_y or turn one of them off.")
+    if pocket.intersects(camera_cutout_poly(p).buffer(1.5)):
+        raise ParamError("The lanyard tether pocket overlaps the camera cut-out.")
+    if not plate_outline_poly(p, p.plate_body_offset).buffer(-1.0).contains(pad):
+        raise ParamError("This phone is too narrow for the lanyard tether pocket.")
+    return pocket
+
+
 def pattern_region(p: Preset):
     """Where the pattern may cut: the plate body inset by the margin, minus the camera cutout
     (plus margin) and, for a deboss/inlay over a MagSafe pocket, the pocket footprint."""
@@ -166,6 +210,9 @@ def pattern_region(p: Preset):
         # (coarse outline: the 48-segment ring arcs otherwise bloat every clipped cell's B-rep)
         keepout = magsafe_pocket_poly(p).buffer(pat.web, quad_segs=6).simplify(0.05)
         region = region.difference(keepout)
+    if p.style.lanyard_pocket:
+        # the tether tab needs a flat, whole pocket floor: keep every pattern finish off it
+        region = region.difference(lanyard_pocket_poly(p).buffer(pat.web, quad_segs=6).simplify(0.05))
     return region
 
 
@@ -864,6 +911,7 @@ def _frame(p: Preset, nd: int = 2, simplify: float = 0.0) -> dict:
         "camera": _path(cam, nd, simplify),
         "ring": _path(_camera_ring_poly(p), nd, simplify),
         "magsafe": _path(magsafe_ring_poly(p), nd, simplify) if p.style.magsafe_ring else "",
+        "lanyard": _path(lanyard_pocket_raw(p), nd, simplify) if p.style.lanyard_pocket else "",
     }
 
 
@@ -879,6 +927,8 @@ def pattern_preview(p: Preset) -> dict:
                 "connectivity": {"islands": 0, "thin_necks": 0}, "error": None,
                 "warnings": [w for w in p.warnings() if w.startswith(("pattern", pat.type))]})
     try:
+        if p.style.lanyard_pocket:      # reported for a solid plate too (no pattern to clip)
+            lanyard_pocket_poly(p)
         polys = pattern_polys(p)
     except ParamError as exc:
         out["error"] = str(exc)

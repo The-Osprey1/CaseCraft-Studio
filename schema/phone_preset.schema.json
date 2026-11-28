@@ -196,6 +196,15 @@
           },
           "z_offset": {
             "type": "number"
+          },
+          "chamfer": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 1.5,
+            "description": "outer 45deg flare of this opening in mm (null = style.port_chamfer), e.g. a Camera Control finger scoop"
           }
         }
       }
@@ -232,7 +241,156 @@
     },
     "style": {
       "type": "object",
-      "description": "see params.Style for all keys and defaults"
+      "additionalProperties": false,
+      "description": "Case construction and print details (params.Style). Every key is optional; omitted keys take the default shown. Preset.check() also enforces combined-parameter rules (floors, pockets, rim clearances).",
+      "properties": {
+        "frame_wall": {
+          "type": "number",
+          "minimum": 1.0,
+          "default": 1.6,
+          "description": "TPU side wall thickness (mm)"
+        },
+        "front_lip": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 1.2,
+          "description": "inward overhang of the screen lip (mm)"
+        },
+        "front_lip_thickness": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 2.4,
+          "description": "screen-lip thickness: 45deg ramp (offset + front_lip) plus >= 0.6 mm flat land"
+        },
+        "backplate_thickness": {
+          "type": "number",
+          "minimum": 1.6,
+          "maximum": 2.0,
+          "default": 1.8,
+          "description": "backplate thickness (mm)"
+        },
+        "tongue_height": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 0.8,
+          "description": "backplate snap tongue height (mm)"
+        },
+        "groove_depth": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 0.9,
+          "description": "retention groove depth into the TPU wall beyond the cavity (mm)"
+        },
+        "snap_engage": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 0.6,
+          "description": "how far the rear TPU lip is inboard of the groove (mm)"
+        },
+        "button_height": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 3.0
+        },
+        "button_cap_height": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 0.8
+        },
+        "button_flange_overhang": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 0.8
+        },
+        "button_flange_thickness": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 0.6
+        },
+        "button_travel": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0.3
+        },
+        "camera_cutout_margin": {
+          "type": "number",
+          "minimum": 0,
+          "default": 1.6,
+          "description": "backplate camera cut-out = island + this margin per side (mm)"
+        },
+        "camera_aperture_margin": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0.2,
+          "description": "clear aperture around the camera island (mm)"
+        },
+        "camera_bezel_height": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 1.5
+        },
+        "camera_bezel_width": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 1.2
+        },
+        "camera_bead": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0.3
+        },
+        "magsafe_ring": {
+          "type": "boolean",
+          "default": false,
+          "description": "magnet-ring pocket on the inside of the backplate"
+        },
+        "magsafe_depth": {
+          "type": "number",
+          "default": 0.75,
+          "description": "magnet-ring pocket depth (mm); leaves >= 0.7 mm backplate floor"
+        },
+        "magsafe_offset_y": {
+          "type": "number",
+          "default": 0.0,
+          "description": "magnet-ring centre shift along Y (mm, - = towards the bottom)"
+        },
+        "port_chamfer": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1.2,
+          "default": 0.6,
+          "description": "outer 45deg flare around every port opening (mm, 0 = straight-walled); a port's own chamfer overrides it"
+        },
+        "grip_ribs": {
+          "type": "boolean",
+          "default": false,
+          "description": "horizontal 45deg V-grooves on the straight long side walls of the bumper (kept clear of buttons and ports)"
+        },
+        "grip_rib_depth": {
+          "type": "number",
+          "minimum": 0.2,
+          "maximum": 0.6,
+          "default": 0.35,
+          "description": "grip groove depth into the outer wall (mm)"
+        },
+        "compliant_buttons": {
+          "type": "boolean",
+          "default": true,
+          "description": "unibody only: flex slits through the wall beside each integrated TPU button cover"
+        },
+        "lanyard_pocket": {
+          "type": "boolean",
+          "default": false,
+          "description": "recess on the inside of the backplate (and unibody floor) for a lanyard tether tab, running to the charging port"
+        },
+        "lanyard_depth": {
+          "type": "number",
+          "minimum": 0.4,
+          "maximum": 0.9,
+          "default": 0.65,
+          "description": "lanyard tether-tab pocket depth (mm); leaves >= 0.6 mm backplate floor"
+        }
+      }
     },
     "pattern": {
       "type": "object",

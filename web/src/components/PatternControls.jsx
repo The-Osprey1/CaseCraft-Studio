@@ -151,7 +151,7 @@ export default function PatternControls({ config, updateConfig, uiMode, onError,
   const types = specs?.types || [];
   const pat = config?.pattern;
   const spec = types.find((t) => t.id === pat?.type);
-  const galleryFrame = useMemo(() => (gallery ? { ...gallery, magsafe: "" } : null), [gallery]);
+  const galleryFrame = useMemo(() => (gallery ? { ...gallery, magsafe: "", lanyard: "" } : null), [gallery]);
 
   if (!config) return null;
   if (!specs) {
@@ -348,6 +348,34 @@ export default function PatternControls({ config, updateConfig, uiMode, onError,
           onChange={(v) =>
             updateConfig((c) => {
               c.style.magsafe_offset_y = v;
+              return c;
+            })
+          }
+        />
+      )}
+
+      <ToggleRow
+        label="Lanyard tether pocket"
+        hint="A recess on the inside of the backplate for a lanyard card; the strap leaves through the charging port. Patterns stay off it (dashed outline)."
+        checked={config.style?.lanyard_pocket}
+        onChange={(v) =>
+          updateConfig((c) => {
+            c.style.lanyard_pocket = v;
+            return c;
+          }, true)
+        }
+      />
+      {config.style?.lanyard_pocket && uiMode === "pro" && (
+        <SliderField
+          label="Lanyard pocket depth"
+          value={config.style?.lanyard_depth ?? 0.65}
+          min={0.4}
+          max={Math.max(0.4, Math.min(0.9, (config.style?.backplate_thickness ?? 1.8) - 0.6))}
+          step={0.05}
+          hint="Leaves at least 0.6 mm of backplate floor"
+          onChange={(v) =>
+            updateConfig((c) => {
+              c.style.lanyard_depth = v;
               return c;
             })
           }

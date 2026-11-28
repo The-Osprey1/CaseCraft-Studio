@@ -19,9 +19,13 @@ Supports **4-part modular snap-fit printing** (single-extruder and AMS printers)
   4. **Floating Tactile Buttons (`Buttons`):** cap-down rigid inserts, held by an internal retaining flange captured inside the TPU wall pocket.
 - **Toolchanger Print-in-Place (`Toolchanger_InPlace.3mf`) — EXPERIMENTAL, toolchanger printer profiles only:** the frame (`extruder 1`), backplate (`2`), inlay (`3`) and buttons (`2`) are co-registered in their assembled positions. Each export includes `PrintInPlace_Report.txt`, a gap analysis of every co-printed pair. With the default clearances, the backplate sits 0.15 mm from the TPU, and buttons touch their pockets at rest. Those parts will print in contact.
 - **1-Piece Unibody (`Unibody_OnePiece.stl`):** one connected solid built from first principles: the bumper envelope with a solid floor. It is verified on every export as one valid, void-free, self-intersection-free solid and a single watertight mesh body. Single-material adaptations are reported, never silent:
-  - raised TPU button covers replace the floating buttons
+  - raised TPU button covers replace the floating buttons; by default two flex slits beside each cover let it press in more easily (`style.compliant_buttons`)
   - the camera surround is flush
   - an inlay becomes a deboss
+- **Grip & openings (frame and unibody, all support-free back-down):**
+  - **Port chamfer** (`style.port_chamfer`, default 0.6 mm; per-opening `ports[].chamfer` up to 1.5 mm, e.g. a Camera Control finger scoop): an outer flare that opens sideways at 45° and upwards a little steeper, and only as far downwards as the wall above the backplate groove allows.
+  - **Grip grooves** (`style.grip_ribs`, `grip_rib_depth` 0.2–0.6 mm): horizontal V-grooves on the straight long side walls, stopping short of buttons, openings and the corners.
+  - **Lanyard tether pocket** (`style.lanyard_pocket`, `lanyard_depth` 0.4–0.9 mm): a recess on the inside of the backplate (and the unibody floor) for a lanyard card, with a neck running to the charging port. Patterns keep off it; it is not part of the flat laser drawing.
 
 ### 2. Pattern Engine & Laser Export
 - **10 Pattern Types:**

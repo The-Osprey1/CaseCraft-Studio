@@ -52,7 +52,20 @@ export default function PlatePreview({ frame, cuts, colors, mode = "through", sh
           fillRule="evenodd"
         />
       )}
-      {showIssues && issues?.thin && <path d={issues.thin} fill="#f59e0b" stroke="#f59e0b" strokeWidth={thin} />}
+      {/* lanyard tether pocket on the inner face: a keep-out the pattern stays off */}
+      {frame.lanyard && (
+        <path
+          d={frame.lanyard}
+          fill={darkPlate ? "#ffffff" : "#000000"}
+          fillOpacity={0.12}
+          stroke={darkPlate ? "#fcd34d" : "#b45309"}
+          strokeOpacity={0.85}
+          strokeWidth={thin * 1.2}
+          strokeDasharray={`${thin * 3} ${thin * 2.5}`}
+          fillRule="evenodd"
+        />
+      )}
+      {showIssues && issues?.thin &&<path d={issues.thin} fill="#f59e0b" stroke="#f59e0b" strokeWidth={thin} />}
       {showIssues && issues?.islands && (
         <path d={issues.islands} fill="#f43f5e" stroke="#fecdd3" strokeWidth={thin} fillRule="evenodd" />
       )}

@@ -442,6 +442,38 @@ export default function DeviceEditor({
                 onChange={set(["ports", idx, "z_offset"])}
                 onFocusChange={track(`port:${idx}`)}
               />
+              {pt.chamfer === null || pt.chamfer === undefined ? (
+                <div className="flex flex-col gap-1">
+                  <span className="text-[11px] text-slate-400">Outer chamfer</span>
+                  <button
+                    type="button"
+                    title="Give this opening its own outer chamfer, e.g. a finger scoop for Camera Control"
+                    onClick={() => set(["ports", idx, "chamfer"], true)(config.style?.port_chamfer ?? 0.6)}
+                    className="rounded-lg border border-dashed border-slate-700 px-2 py-1.5 text-left text-[11px] text-slate-400 hover:border-cyan-500 hover:text-cyan-200"
+                  >
+                    Case default ({config.style?.port_chamfer ?? 0.6} mm) · set own
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-1">
+                  <NumberField
+                    label="Outer chamfer"
+                    value={pt.chamfer}
+                    min={0}
+                    max={1.5}
+                    step={0.1}
+                    onChange={set(["ports", idx, "chamfer"])}
+                    onFocusChange={track(`port:${idx}`)}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => set(["ports", idx, "chamfer"], true)(null)}
+                    className="self-start text-[10px] text-slate-500 hover:text-cyan-300"
+                  >
+                    Use case default
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         ))}
